@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.kamil.cyberpower-ups",
+  "name": "CyberPower UPS",
+  "version": "0.2.0",
+  "author": "kamil",
+  "license": "MIT",
+  "description": "CyberPower UPS status in the bar: battery, runtime, load and mains voltage, read straight off the USB HID device, with pwrstat and NUT fallbacks and an optional event history.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "CyberPower UPS",
+    "description": "Shows charge, runtime and power state of a CyberPower USB UPS. Click for details and self-test or alarm controls.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "source": "Auto",
+      "intervalSec": 15,
+      "showPercent": true,
+      "upsName": "",
+      "warnBattery": 30,
+      "criticalBattery": 15,
+      "iconPreset": "Auto",
+      "showTestControls": true,
+      "debug": false
+    },
+    "schema": [
+      {
+        "key": "source",
+        "type": "enum",
+        "label": "Data source",
+        "options": ["Auto", "USB direct", "pwrstat", "NUT", "Simulate"],
+        "defaultValue": "Auto",
+        "description": "Auto tries a direct USB read first, then pwrstat, then NUT. Simulate shows sample data with no UPS attached."
+      },
+      {
+        "key": "intervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 5,
+        "max": 3600,
+        "step": 5,
+        "defaultValue": 15,
+        "description": "How often to poll the UPS. Direct USB reads are cheap; 15-30 seconds is plenty."
+      },
+      {
+        "key": "showPercent",
+        "type": "boolean",
+        "label": "Show battery percentage",
+        "defaultValue": true,
+        "description": "Print the charge beside the icon. Off leaves just the icon."
+      },
+      {
+        "key": "upsName",
+        "type": "string",
+        "label": "NUT UPS name",
+        "defaultValue": "",
+        "description": "Required by the NUT backend. Leave empty to use the first UPS upsc lists."
+      },
+      {
+        "key": "warnBattery",
+        "type": "integer",
+        "label": "Low battery warning (%)",
+        "min": 5,
+        "max": 90,
+        "step": 5,
+        "defaultValue": 30,
+        "description": "Tint the icon when charge drops to or below this while on battery."
+      },
+      {
+        "key": "criticalBattery",
+        "type": "integer",
+        "label": "Critical battery (%)",
+        "min": 1,
+        "max": 50,
+        "step": 1,
+        "defaultValue": 15,
+        "description": "Use the urgent color at or below this charge."
+      },
+      {
+        "key": "iconPreset",
+        "type": "enum",
+        "label": "Icon style",
+        "options": ["Auto", "Battery", "Power"],
+        "defaultValue": "Auto",
+        "description": "Auto uses a battery glyph that tracks charge; Power always uses a power/battery-carrying glyph."
+      },
+      {
+        "key": "showTestControls",
+        "type": "boolean",
+        "label": "Show self-test controls",
+        "defaultValue": true,
+        "description": "Show the Self-test and Abort buttons in the popup. Turn off if the UPS's test beeps are unwelcome; the CLI can still run tests on demand."
+      },
+      {
+        "key": "debug",
+        "type": "boolean",
+        "label": "Write a debug trace",
+        "defaultValue": false,
+        "description": "Record every device read and write to ~/.local/state/cyberpower-ups/debug.log. Leave off for normal use; turn on when reporting a problem."
+      }
+    ]
+  }
+}

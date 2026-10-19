@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+"""Interactive control panel for a CyberPower UPS.
+
+This is only the entry point. The panel itself lives in the ``cyberpower_tui``
+package beside this script, and it is a pure front end: everything it shows
+comes from running ``bin/cyberpower-ups`` (the command-line reader) and parsing
+its output. Nothing here talks to USB, HID, pwrstat or NUT directly.
+
+The bar widget opens this with `omarchy-launch-terminal cyberpower-ups-tui`;
+it runs the same way from a bare terminal.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from cyberpower_tui.app import main  # noqa: E402  (path set up above)
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,18 @@
+[Unit]
+Description=CyberPower UPS history recorder
+Documentation=file:%h/.config/omarchy/plugins/io.github.kamil.cyberpower-ups/README.md
+# The recorder opens /dev/hidraw* itself, so it wants the bundled udev rule
+# (udev/60-cyberpower-ups.rules) installed for the logged-in user.
+After=graphical-session.target
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/.config/omarchy/plugins/io.github.kamil.cyberpower-ups/bin/cyberpower-ups watch --source hidraw --interval 60
+# A sample is one HID read; 60 s is fine for a voltage history. The reader
+# tolerates a missing device by itself and records one line when it goes away.
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,8 @@
+# CyberPower UPS -- direct USB HID access
+#
+# udev tags a hidraw node with "uaccess", which makes systemd-logind grant the
+# user of the active session an ACL on the node. Without it, /dev/hidraw* is
+# root-only and the widget can only use the pwrstat or NUT backends.
+#
+# Vendor 0764 is CyberPower. The reader matches the same vendor id itself.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0764", TAG+="uaccess"

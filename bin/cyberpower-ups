@@ -1,0 +1,1626 @@
+#!/usr/bin/env python3
+"""Read a CyberPower UPS without CyberPower's PowerPanel suite.
+
+Three backends, tried in order (or forced with --source):
+
+  hidraw   Talk to the UPS directly. A CyberPower UPS is a plain USB HID
+           device: everything worth knowing lives in feature reports of the
+           HID Power Device class (usage page 0x84) and Battery System class
+           (usage page 0x85). We read the HID report descriptor from the
+           kernel, work out where each usage sits in its report, and ask for
+           the report. No daemon, no root — just a udev rule so the logged-in
+           user may open the hidraw node (see udev/ in this plugin).
+  pwrstat  Parse `pwrstat -status` from the AUR package `powerpanel`
+           (CyberPower's own PowerPanel Personal for Linux).
+  nut      Parse `upsc` from Network UPS Tools, for when the UPS is already
+           owned by a NUT usbhid-ups driver.
+
+The three are normalized to one JSON document so the bar widget does not care
+which one answered.
+
+Layout of this file, top to bottom:
+  * report-descriptor parser (HID is a self-describing protocol)
+  * feature-report reader over hidraw
+  * usage -> our field mapping, with the CyberPower quirk fixes NUT applies
+  * pwrstat / NUT backends
+  * command line
+
+Nothing outside the Python standard library is used.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import glob
+import json
+import os
+import re
+import struct
+import subprocess
+import sys
+import time
+import traceback
+
+# --------------------------------------------------------------------------
+# Diagnostics: a crash log, and an opt-in debug trace
+# --------------------------------------------------------------------------
+#
+# This program usually runs headless: the bar widget spawns it and reads its
+# stdout, or a launcher opens the TUI in a terminal that closes on exit. Either
+# way stderr is gone by the time anyone looks, so a traceback is kept on disk.
+# Crashes are always recorded; the debug trace is opt-in (--debug or
+# CYBERPOWER_UPS_DEBUG=1) so an ordinary poll writes nothing at all.
+
+
+def state_dir() -> str:
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(base, "cyberpower-ups")
+
+
+LOG_MAX_BYTES = 256 * 1024
+
+
+def _stamp() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+class Diag:
+    """Crash traces and an opt-in debug trace, in the state directory."""
+
+    def __init__(self) -> None:
+        self.debug_enabled = False
+        self.echo = False
+
+    @staticmethod
+    def path(name: str) -> str:
+        return os.path.join(state_dir(), name)
+
+    def _append(self, name: str, text: str) -> None:
+        path = self.path(name)
+        try:
+            os.makedirs(state_dir(), exist_ok=True)
+            if os.path.exists(path) and os.path.getsize(path) > LOG_MAX_BYTES:
+                os.replace(path, path + ".1")      # keep one older generation
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(text)
+        except OSError:
+            pass                                   # logging must never raise
+
+    def debug(self, message: str) -> None:
+        if not self.debug_enabled:
+            return
+        line = f"{_stamp()} [{os.getpid()}] {message}"
+        self._append("debug.log", line + "\n")
+        if self.echo:
+            print(f"debug: {message}", file=sys.stderr)
+
+    def crash(self, error: BaseException) -> str:
+        """Record a traceback; returns the file it went to."""
+        text = (f"{_stamp()} [{os.getpid()}] crashed: "
+                f"{' '.join(sys.argv[1:])}\n"
+                + "".join(traceback.format_exception(error)))
+        self._append("crash.log", text + "\n")
+        return self.path("crash.log")
+
+
+DIAG = Diag()
+
+# --------------------------------------------------------------------------
+# HID constants
+# --------------------------------------------------------------------------
+
+ITEM_TYPE_MAIN = 0
+ITEM_TYPE_GLOBAL = 1
+ITEM_TYPE_LOCAL = 2
+
+MAIN_INPUT = 0x8
+MAIN_OUTPUT = 0x9
+MAIN_FEATURE = 0xB
+MAIN_COLLECTION = 0xA
+MAIN_END_COLLECTION = 0xC
+
+GLOBAL_USAGE_PAGE = 0x0
+GLOBAL_LOGICAL_MIN = 0x1
+GLOBAL_LOGICAL_MAX = 0x2
+GLOBAL_PHYSICAL_MIN = 0x3
+GLOBAL_PHYSICAL_MAX = 0x4
+GLOBAL_UNIT_EXPONENT = 0x5
+GLOBAL_UNIT = 0x6
+GLOBAL_REPORT_SIZE = 0x7
+GLOBAL_REPORT_ID = 0x8
+GLOBAL_REPORT_COUNT = 0x9
+GLOBAL_PUSH = 0xA
+GLOBAL_POP = 0xB
+
+LOCAL_USAGE = 0x0
+LOCAL_USAGE_MIN = 0x1
+LOCAL_USAGE_MAX = 0x2
+
+REPORT_FEATURE = 0
+REPORT_INPUT = 1
+REPORT_OUTPUT = 2
+
+# Usage codes we care about, as (page << 16) | id.
+PAGE_POWER = 0x84
+PAGE_BATTERY = 0x85
+
+
+def u(page: int, usage_id: int) -> int:
+    return (page << 16) | usage_id
+
+
+U_UPS = u(PAGE_POWER, 0x04)
+U_POWER_SUMMARY = u(PAGE_POWER, 0x24)
+U_PRESENT_STATUS = u(PAGE_POWER, 0x02)
+U_BATTERY = u(PAGE_POWER, 0x12)
+U_INPUT = u(PAGE_POWER, 0x1A)
+U_OUTPUT = u(PAGE_POWER, 0x1C)
+
+U_VOLTAGE = u(PAGE_POWER, 0x30)
+U_FREQUENCY = u(PAGE_POWER, 0x32)
+U_APPARENT_POWER = u(PAGE_POWER, 0x33)
+U_ACTIVE_POWER = u(PAGE_POWER, 0x34)
+U_PERCENT_LOAD = u(PAGE_POWER, 0x35)
+U_TEMPERATURE = u(PAGE_POWER, 0x36)
+U_CONFIG_VOLTAGE = u(PAGE_POWER, 0x40)
+U_CONFIG_APPARENT_POWER = u(PAGE_POWER, 0x43)
+U_CONFIG_ACTIVE_POWER = u(PAGE_POWER, 0x44)
+U_TEST = u(PAGE_POWER, 0x58)
+U_AUDIBLE_ALARM = u(PAGE_POWER, 0x5A)
+U_LOW_VOLTAGE_TRANSFER = u(PAGE_POWER, 0x53)
+U_HIGH_VOLTAGE_TRANSFER = u(PAGE_POWER, 0x54)
+U_DELAY_BEFORE_STARTUP = u(PAGE_POWER, 0x56)
+U_DELAY_BEFORE_SHUTDOWN = u(PAGE_POWER, 0x57)
+U_OVERLOAD = u(PAGE_POWER, 0x65)
+U_BOOST = u(PAGE_POWER, 0x6E)
+
+U_REMAINING_CAPACITY = u(PAGE_BATTERY, 0x66)
+U_FULL_CHARGE_CAPACITY = u(PAGE_BATTERY, 0x67)
+U_RUN_TIME_TO_EMPTY = u(PAGE_BATTERY, 0x68)
+U_AVERAGE_TIME_TO_EMPTY = u(PAGE_BATTERY, 0x69)
+U_REMAINING_CAPACITY_LIMIT = u(PAGE_BATTERY, 0x29)
+U_REMAINING_TIME_LIMIT = u(PAGE_BATTERY, 0x2A)
+U_WARNING_CAPACITY_LIMIT = u(PAGE_BATTERY, 0x8C)
+U_AC_PRESENT = u(PAGE_BATTERY, 0xD0)
+U_CHARGING = u(PAGE_BATTERY, 0x44)
+U_DISCHARGING = u(PAGE_BATTERY, 0x45)
+U_FULLY_CHARGED = u(PAGE_BATTERY, 0x46)
+U_BELOW_CAPACITY_LIMIT = u(PAGE_BATTERY, 0x42)
+U_REMAINING_TIME_LIMIT_EXPIRED = u(PAGE_BATTERY, 0x43)
+U_NEED_REPLACEMENT = u(PAGE_BATTERY, 0x4B)
+U_POWER_FAIL = u(PAGE_BATTERY, 0xD2)
+
+
+# --------------------------------------------------------------------------
+# Report descriptor parser
+# --------------------------------------------------------------------------
+
+def _signed(value: int, size: int) -> int:
+    if size and value & (1 << (8 * size - 1)):
+        value -= 1 << (8 * size)
+    return value
+
+
+class Field:
+    """One extractable item of a report: a usage at a bit offset."""
+
+    __slots__ = ("usage", "path", "report_id", "report_type", "offset", "size",
+                 "log_min", "log_max", "phy_min", "phy_max", "has_phy",
+                 "unit", "unit_exp", "flags")
+
+    def __init__(self, **kw):
+        for key in self.__slots__:
+            setattr(self, key, kw.get(key, 0))
+
+
+def parse_report_descriptor(desc: bytes) -> tuple[list[Field], dict, bool]:
+    """Parse a HID report descriptor into fields.
+
+    Returns (fields, report_lengths, uses_report_ids) where report_lengths
+    maps (report_id, report_type) to the report length in bits.
+    """
+    fields: list[Field] = []
+    report_bits: dict[tuple[int, int], int] = {}
+
+    page = 0
+    log_min = log_max = 0
+    phy_min = phy_max = 0
+    have_phy = False
+    unit = 0
+    unit_exp = 0
+    report_size = 0
+    report_count = 0
+    report_id = 0
+    stack: list[dict] = []
+    locals_usages: list[int] = []
+    usage_min = usage_max = None
+    collection: list[int] = []
+    uses_report_ids = False
+
+    i = 0
+    n = len(desc)
+    while i < n:
+        prefix = desc[i]
+        i += 1
+        if prefix == 0xFE:  # long item
+            if i + 2 > n:
+                break
+            size = desc[i]
+            i += 2 + size
+            continue
+
+        bsize = prefix & 0x03
+        if bsize == 3:
+            bsize = 4
+        item_type = (prefix >> 2) & 0x03
+        tag = (prefix >> 4) & 0x0F
+        raw = desc[i:i + bsize]
+        i += bsize
+        value = int.from_bytes(raw, "little") if bsize else 0
+
+        if item_type == ITEM_TYPE_GLOBAL:
+            if tag in (GLOBAL_LOGICAL_MIN, GLOBAL_LOGICAL_MAX,
+                       GLOBAL_PHYSICAL_MIN, GLOBAL_PHYSICAL_MAX, GLOBAL_UNIT_EXPONENT):
+                value = _signed(value, bsize)
+            if tag == GLOBAL_USAGE_PAGE:
+                page = value
+            elif tag == GLOBAL_LOGICAL_MIN:
+                log_min = value
+            elif tag == GLOBAL_LOGICAL_MAX:
+                log_max = value
+                # Several firms encode a logical maximum above the signed
+                # range in the smallest encoding that fits, so a logical max
+                # of 0..65535 arrives as -1. When that makes max < min, the
+                # vendor meant the unsigned value; NUT reinterprets it, and so
+                # do we.
+                if log_max < log_min:
+                    log_max = int.from_bytes(raw, "little")
+            elif tag == GLOBAL_PHYSICAL_MIN:
+                phy_min = value
+                have_phy = True
+            elif tag == GLOBAL_PHYSICAL_MAX:
+                phy_max = value
+                have_phy = True
+            elif tag == GLOBAL_UNIT_EXPONENT:
+                # A 4-bit signed nibble: 0x0F is -1, not 15.
+                unit_exp = value & 0x0F
+                if unit_exp > 7:
+                    unit_exp -= 16
+            elif tag == GLOBAL_UNIT:
+                unit = value
+            elif tag == GLOBAL_REPORT_SIZE:
+                report_size = value
+            elif tag == GLOBAL_REPORT_ID:
+                report_id = value
+                uses_report_ids = True
+            elif tag == GLOBAL_REPORT_COUNT:
+                report_count = value
+            elif tag == GLOBAL_PUSH:
+                stack.append(dict(page=page, log_min=log_min, log_max=log_max,
+                                  phy_min=phy_min, phy_max=phy_max, have_phy=have_phy,
+                                  unit=unit, unit_exp=unit_exp, report_size=report_size,
+                                  report_count=report_count, report_id=report_id))
+            elif tag == GLOBAL_POP and stack:
+                saved = stack.pop()
+                page = saved["page"]
+                log_min, log_max = saved["log_min"], saved["log_max"]
+                phy_min, phy_max, have_phy = saved["phy_min"], saved["phy_max"], saved["have_phy"]
+                unit, unit_exp = saved["unit"], saved["unit_exp"]
+                report_size, report_count = saved["report_size"], saved["report_count"]
+                report_id = saved["report_id"]
+            continue
+
+        if item_type == ITEM_TYPE_LOCAL:
+            if tag == LOCAL_USAGE:
+                if bsize == 4:
+                    locals_usages.append(value)
+                else:
+                    locals_usages.append(u(page, value))
+            elif tag == LOCAL_USAGE_MIN:
+                usage_min = u(page, value)
+            elif tag == LOCAL_USAGE_MAX:
+                usage_max = u(page, value)
+            continue
+
+        # main item
+        if tag == MAIN_COLLECTION:
+            collection.append(locals_usages[0] if locals_usages else u(page, 0))
+        elif tag == MAIN_END_COLLECTION:
+            if collection:
+                collection.pop()
+        elif tag in (MAIN_INPUT, MAIN_OUTPUT, MAIN_FEATURE):
+            report_type = {MAIN_INPUT: REPORT_INPUT, MAIN_OUTPUT: REPORT_OUTPUT,
+                           MAIN_FEATURE: REPORT_FEATURE}[tag]
+            usages = list(locals_usages)
+            if not usages and usage_min is not None and usage_max is not None:
+                usages = [usage_min + k for k in range(usage_max - usage_min + 1)]
+            if not usages:
+                usages = [0]
+            key = (report_id, report_type)
+            base = report_bits.get(key, 0)
+            for index in range(max(1, report_count)):
+                usage = usages[index] if index < len(usages) else usages[-1]
+                fields.append(Field(
+                    usage=usage,
+                    path=tuple(collection),
+                    report_id=report_id,
+                    report_type=report_type,
+                    offset=base + index * report_size,
+                    size=report_size,
+                    log_min=log_min,
+                    log_max=log_max,
+                    phy_min=phy_min,
+                    phy_max=phy_max,
+                    has_phy=1 if have_phy else 0,
+                    unit=unit,
+                    unit_exp=unit_exp,
+                    flags=value,
+                ))
+            report_bits[key] = base + max(1, report_count) * report_size
+
+        if tag in (MAIN_INPUT, MAIN_OUTPUT, MAIN_FEATURE, MAIN_COLLECTION, MAIN_END_COLLECTION):
+            locals_usages = []
+            usage_min = usage_max = None
+
+    return fields, report_bits, uses_report_ids
+
+
+def extract(report: bytes, offset: int, size: int) -> int:
+    """Pull `size` bits at `offset` out of a report body (LSB-first)."""
+    value = 0
+    for bit in range(size):
+        pos = offset + bit
+        byte = pos >> 3
+        if byte < len(report) and (report[byte] >> (pos & 7)) & 1:
+            value |= 1 << bit
+    return value
+
+
+def _logical_value(field: Field, raw: int) -> int:
+    """An unsigned report value -> the signed logical value it stands for."""
+    if field.log_min < 0 and raw & (1 << (field.size - 1)):
+        raw -= 1 << field.size
+    return raw
+
+
+def _logical_to_physical(field: Field, logical: int) -> float:
+    """A logical value -> the physical value the descriptor declares."""
+    if (field.has_phy
+            and field.phy_max > field.phy_min
+            and field.log_max > field.log_min):
+        factor = (field.phy_max - field.phy_min) / (field.log_max - field.log_min)
+        value = (logical - field.log_min) * factor + field.phy_min
+        return min(field.phy_max, max(field.phy_min, value))
+    return float(logical)
+
+
+def _physical_to_logical(field: Field, physical: float) -> int:
+    """_logical_to_physical's inverse, for writing a feature report back."""
+    if (field.has_phy
+            and field.phy_max > field.phy_min
+            and field.log_max > field.log_min):
+        factor = (field.phy_max - field.phy_min) / (field.log_max - field.log_min)
+        return int(round((physical - field.phy_min) / factor + field.log_min))
+    return int(round(physical))
+
+
+def to_physical(field: Field, raw: int) -> float:
+    """Logical report value -> the physical value the descriptor declares.
+
+    Unit exponents are deliberately not applied here; callers combine them
+    with the unit's base exponent (see UNIT_BASE_EXPONENT).
+    """
+    return _logical_to_physical(field, _logical_value(field, raw))
+
+
+# --------------------------------------------------------------------------
+# hidraw access
+# --------------------------------------------------------------------------
+
+HIDIOCGRDESCSIZE = 0x80044801
+HIDIOCGRDESC = 0x90044802
+
+
+def _ioc(direction: int, size: int, nr: int) -> int:
+    return (direction << 30) | (size << 16) | (ord("H") << 8) | nr
+
+
+def hidraw_get_feature(fd: int, report_id: int, length: int) -> bytes:
+    """Fetch a feature report; returns the report body without the id byte."""
+    buf = bytearray(length + 1)
+    buf[0] = report_id
+    request = _ioc(3, len(buf), 0x07)
+    ret = fcntl.ioctl(fd, request, buf, True)
+    data = bytes(buf[1:1 + ret])
+    return data
+
+
+def hidraw_set_feature(fd: int, report_id: int, body: bytes) -> None:
+    buf = bytearray(1 + len(body))
+    buf[0] = report_id
+    buf[1:] = body
+    request = _ioc(3, len(buf), 0x06)
+    fcntl.ioctl(fd, request, buf, False)
+
+
+class UpsDevice:
+    """A CyberPower UPS found on a hidraw node."""
+
+    def __init__(self, path: str, vendor: int, product: int, name: str):
+        self.path = path
+        self.vendor = vendor
+        self.product = product
+        self.name = name
+        self.fields: list[Field] = []
+        self.report_bits: dict[tuple[int, int], int] = {}
+        self.uses_report_ids = False
+
+    # -- discovery --------------------------------------------------------
+
+    @staticmethod
+    def find(vendor_ids=(0x0764,), product_hint=None) -> "UpsDevice | None":
+        candidates = []
+        for node in sorted(glob.glob("/dev/hidraw*")):
+            name = os.path.basename(node)
+            uevent = f"/sys/class/hidraw/{name}/device/uevent"
+            try:
+                with open(uevent) as handle:
+                    text = handle.read()
+            except OSError:
+                continue
+            match = re.search(r"HID_ID=([0-9A-Fa-f]+):([0-9A-Fa-f]+):([0-9A-Fa-f]+)", text)
+            if not match:
+                continue
+            _bus, vendor, product = (int(g, 16) for g in match.groups())
+            if vendor not in vendor_ids:
+                continue
+            if product_hint is not None and product != product_hint:
+                continue
+            label = ""
+            for line in text.splitlines():
+                if line.startswith("HID_NAME="):
+                    label = line.split("=", 1)[1]
+            try:
+                st = os.stat(node)
+                if st.st_mode & 0o044 == 0:
+                    continue  # only root can read it; a udev rule is needed
+            except OSError:
+                continue
+            candidates.append(UpsDevice(node, vendor, product, label))
+        # Prefer the device whose descriptor actually looks like a UPS.
+        for device in candidates:
+            try:
+                DIAG.debug(f"found {device.path} {device.vendor:04x}:{device.product:04x} "
+                           f"{device.name!r}, checking descriptor")
+                if device.load_descriptor():
+                    DIAG.debug(f"using {device.path}")
+                    return device
+            except OSError as error:
+                DIAG.debug(f"{device.path}: cannot read descriptor: {error}")
+                continue
+        DIAG.debug(f"no usable UPS among {len(candidates)} CyberPower node(s)")
+        return None
+
+    # -- descriptor -------------------------------------------------------
+
+    def load_descriptor(self) -> bool:
+        fd = os.open(self.path, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            # The ioctl mutates the buffer in place and returns 0, so the size
+            # has to be read back out of the buffer, not from the return value.
+            size_buf = bytearray(4)
+            fcntl.ioctl(fd, HIDIOCGRDESCSIZE, size_buf, True)
+            size = struct.unpack("<I", size_buf)[0]
+            if not 0 < size <= 4096:
+                return False
+            buf = bytearray(size + 4)
+            struct.pack_into("<I", buf, 0, size)
+            fcntl.ioctl(fd, HIDIOCGRDESC, buf, True)
+            descriptor = bytes(buf[4:4 + size])
+        finally:
+            os.close(fd)
+        self.fields, self.report_bits, self.uses_report_ids = parse_report_descriptor(descriptor)
+        self.descriptor = descriptor
+        DIAG.debug(f"descriptor {size} B -> {len(self.fields)} fields, "
+                   f"report ids {sorted({f.report_id for f in self.fields})}")
+        return any(field.usage in (U_UPS, U_POWER_SUMMARY, U_PRESENT_STATUS)
+                   or field.path and (field.path[0] & 0xFFFF) == 0x04
+                   for field in self.fields)
+
+    # -- reads ------------------------------------------------------------
+
+    def _read_report(self, report_id: int, report_type: int) -> bytes:
+        bits = self.report_bits.get((report_id, report_type), 0)
+        length = (bits + 7) // 8
+        fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            if report_type != REPORT_FEATURE:
+                raise SystemExit("only feature reports are supported")
+            return hidraw_get_feature(fd, report_id, length)
+        finally:
+            os.close(fd)
+
+    def read_all(self, usages=None) -> dict[int, bytes]:
+        """Read this device's feature reports, optionally only the wanted ones.
+
+        Each feature report is a USB round trip (~80 ms on the UT2200EG), and a
+        present-day CyberPower publishes thirty-odd of them. A poll only needs a
+        handful, so `usages` narrows the set to reports that carry at least one
+        of those usages. `None` reads everything, which is what `dump` wants.
+        """
+        wanted = set(usages) if usages is not None else None
+        cache: dict[int, bytes] = {}
+        seen: set[int] = set()
+        for field in self.fields:
+            if field.report_type != REPORT_FEATURE:
+                continue
+            if wanted is not None and field.usage not in wanted:
+                continue
+            report_id = field.report_id
+            if report_id in seen:
+                continue
+            seen.add(report_id)
+            started = time.monotonic()
+            try:
+                cache[report_id] = self._read_report(report_id, REPORT_FEATURE)
+            except OSError as error:
+                DIAG.debug(f"report 0x{report_id:02x} failed: {error}")
+                cache[report_id] = b""
+            body = cache[report_id]
+            DIAG.debug(f"report 0x{report_id:02x} {len(body)} B "
+                       f"{(time.monotonic() - started) * 1000:.0f} ms {body.hex()}")
+        return cache
+
+    def value_of(self, cache, *usages, path=None, plausible=None) -> float | None:
+        for field in self.fields:
+            if field.report_type != REPORT_FEATURE or field.usage not in usages:
+                continue
+            if path is not None and not any(node == path for node in field.path):
+                continue
+            body = cache.get(field.report_id, b"")
+            if not body:
+                continue
+            raw = extract(body, field.offset, field.size)
+            base = to_physical(field, raw)
+            exponent = field.unit_exp - UNIT_BASE_EXPONENT.get(field.unit, 0)
+            scaled = base * (10.0 ** exponent)
+            return _pick([scaled, base, base / 10.0, base * 10.0], plausible)
+        return None
+
+    def flags_of(self, cache, *usages) -> dict[int, int]:
+        out: dict[int, int] = {}
+        for field in self.fields:
+            if field.report_type != REPORT_FEATURE or field.usage not in usages:
+                continue
+            body = cache.get(field.report_id, b"")
+            if not body:
+                continue
+            out[field.usage] = extract(body, field.offset, field.size)
+        return out
+
+    def field_for(self, *usages, path=None) -> Field | None:
+        for field in self.fields:
+            if field.usage in usages and field.report_type == REPORT_FEATURE:
+                if path is not None and not any(node == path for node in field.path):
+                    continue
+                return field
+        return None
+
+    def command(self, *usages, value: int) -> bool:
+        for field in self.fields:
+            if field.usage in usages and field.report_type == REPORT_FEATURE:
+                bits = self.report_bits.get((field.report_id, REPORT_FEATURE), 0)
+                body = bytearray((bits + 7) // 8)
+                try:
+                    body = bytearray(self._read_report(field.report_id, REPORT_FEATURE))
+                except OSError:
+                    pass
+                while len(body) < (field.offset + field.size + 7) // 8:
+                    body.append(0)
+                for bit in range(field.size):
+                    pos = field.offset + bit
+                    mask = 1 << (pos & 7)
+                    if (value >> bit) & 1:
+                        body[pos >> 3] |= mask
+                    else:
+                        body[pos >> 3] &= ~mask & 0xFF
+                fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK)
+                try:
+                    hidraw_set_feature(fd, field.report_id, bytes(body))
+                finally:
+                    os.close(fd)
+                DIAG.debug(f"wrote usage 0x{field.usage & 0xFFFF:04x} value {value} "
+                           f"-> report 0x{field.report_id:02x} {bytes(body).hex()}")
+                return True
+        return False
+
+
+# --------------------------------------------------------------------------
+# The CyberPower poll: readings, then the handful of quirks NUT corrects
+# --------------------------------------------------------------------------
+
+# Every usage a poll consults. Restricting read_all() to these keeps a status
+# poll off the reports that hold only test results, serial numbers and vendor
+# data. Keep it in sync with read_hidraw() below.
+POLL_USAGES = frozenset({
+    U_REMAINING_CAPACITY, U_FULL_CHARGE_CAPACITY, U_RUN_TIME_TO_EMPTY,
+    U_AVERAGE_TIME_TO_EMPTY, U_PERCENT_LOAD, U_ACTIVE_POWER, U_APPARENT_POWER,
+    U_VOLTAGE, U_FREQUENCY, U_CONFIG_VOLTAGE, U_CONFIG_APPARENT_POWER,
+    U_CONFIG_ACTIVE_POWER, U_TEMPERATURE, U_TEST, U_AUDIBLE_ALARM,
+    U_AC_PRESENT, U_CHARGING, U_DISCHARGING, U_BELOW_CAPACITY_LIMIT,
+    U_FULLY_CHARGED, U_NEED_REPLACEMENT, U_OVERLOAD, U_BOOST, U_POWER_FAIL,
+    U_REMAINING_TIME_LIMIT_EXPIRED,
+})
+
+
+def read_hidraw(device: "UpsDevice | None" = None) -> dict:
+    if device is None:
+        device = UpsDevice.find()
+    if device is None:
+        raise NoDevice("no CyberPower UPS on a readable hidraw node")
+
+    cache = device.read_all(POLL_USAGES)
+
+    charge = device.value_of(cache, U_REMAINING_CAPACITY, plausible=(0, 100))
+    runtime = device.value_of(cache, U_RUN_TIME_TO_EMPTY, plausible=(1, 86400))
+    runtime_avg = device.value_of(cache, U_AVERAGE_TIME_TO_EMPTY, plausible=(1, 86400))
+    load = device.value_of(cache, U_PERCENT_LOAD, plausible=(0, 100))
+    active_power = device.value_of(cache, U_ACTIVE_POWER, plausible=(1, 100000))
+    apparent_power = device.value_of(cache, U_APPARENT_POWER, plausible=(1, 100000))
+    in_volt = device.value_of(cache, U_VOLTAGE, path=U_INPUT, plausible=(80, 300))
+    out_volt = device.value_of(cache, U_VOLTAGE, path=U_OUTPUT, plausible=(80, 300))
+    batt_volt = device.value_of(cache, U_VOLTAGE, path=U_BATTERY, plausible=(6, 60))
+    # Some models (e.g. the UT2200EG) put the battery voltage in the Power
+    # Summary collection right next to RemainingCapacity rather than under a
+    # Battery collection, so fall back to the Power Summary's Voltage usage.
+    if batt_volt is None:
+        batt_volt = device.value_of(cache, U_VOLTAGE, path=U_POWER_SUMMARY, plausible=(6, 60))
+    in_freq = device.value_of(cache, U_FREQUENCY, path=U_INPUT, plausible=(40, 70))
+    out_freq = device.value_of(cache, U_FREQUENCY, path=U_OUTPUT, plausible=(40, 70))
+    nominal_volt = device.value_of(cache, U_CONFIG_VOLTAGE, path=U_INPUT, plausible=(80, 300))
+    temperature = device.value_of(cache, U_TEMPERATURE, plausible=(-40, 120))
+    test_result = device.value_of(cache, U_TEST)
+    alarm = device.value_of(cache, U_AUDIBLE_ALARM)
+
+    if in_freq is None:
+        in_freq = out_freq
+    if out_freq is None:
+        out_freq = in_freq
+
+    # Some models (product 0x0501) report battery voltage 1.5x too high.
+    if batt_volt is not None and nominal_volt:
+        if nominal_volt > 0 and batt_volt / nominal_volt > 1.4:
+            batt_volt = batt_volt * 2 / 3
+
+    if charge is not None:
+        charge = max(0.0, min(100.0, charge))
+
+    flags = device.flags_of(cache, U_AC_PRESENT, U_CHARGING, U_DISCHARGING,
+                            U_BELOW_CAPACITY_LIMIT, U_FULLY_CHARGED,
+                            U_NEED_REPLACEMENT, U_OVERLOAD, U_BOOST,
+                            U_POWER_FAIL, U_REMAINING_TIME_LIMIT_EXPIRED)
+
+    ac_present = bool(flags.get(U_AC_PRESENT, 1))
+    on_battery = bool(flags.get(U_DISCHARGING, 0)) or not ac_present
+    charging = bool(flags.get(U_CHARGING, 0))
+    low = bool(flags.get(U_BELOW_CAPACITY_LIMIT, 0))
+    if charge is not None and charge <= 20:
+        low = True
+
+    if flags.get(U_NEED_REPLACEMENT):
+        status = "replaceBattery"
+    elif flags.get(U_OVERLOAD):
+        status = "overload"
+    elif low and on_battery:
+        status = "lowBattery"
+    elif on_battery:
+        status = "onBattery"
+    elif charging:
+        status = "charging"
+    elif flags.get(U_FULLY_CHARGED, 0):
+        status = "fullyCharged"
+    else:
+        status = "online"
+
+    return {
+        "source": "hidraw",
+        "device": device.path,
+        "model": device.name or None,
+        "firmware": None,
+        "status": status,
+        "online": not on_battery,
+        "onBattery": on_battery,
+        "lowBattery": low,
+        "charging": charging,
+        "fullyCharged": bool(flags.get(U_FULLY_CHARGED, 0)),
+        "replaceBattery": bool(flags.get(U_NEED_REPLACEMENT, 0)),
+        "overload": bool(flags.get(U_OVERLOAD, 0)),
+        "boost": bool(flags.get(U_BOOST, 0)),
+        "battery": _round(charge),
+        "batteryVoltage": _round(batt_volt, 1),
+        "runtimeMin": _minutes(runtime or runtime_avg),
+        "loadPercent": _round(load),
+        "loadWatts": _round(active_power),
+        "apparentPower": _round(apparent_power),
+        "inputVoltage": _round(in_volt, 1),
+        "outputVoltage": _round(out_volt, 1),
+        "inputFrequency": _round(in_freq, 1),
+        "outputFrequency": _round(out_freq, 1),
+        "nominalVoltage": _round(nominal_volt),
+        "temperature": _round(temperature, 1),
+        "testResult": _test_label(test_result),
+        "lastEvent": None,
+        "alarmMuted": None if alarm is None else alarm in (1, 3),
+        "updated": int(time.time()),
+    }
+
+
+# The HID unit codes NUT recognizes, with the power of ten each unit's base
+# value is expressed in. A declared Unit Exponent is applied relative to this,
+# exactly as NUT does it (drivers/libhid.c, HIDUnits[]), so a descriptor that
+# follows the HID Power Device reference (voltage exponent 7, unit 0x00F0D121)
+# yields volts rather than scaled microvolts.
+UNIT_BASE_EXPONENT = {
+    0x00000000: 0,   # None / percent
+    0x00F0D121: 7,   # Voltage
+    0x00100001: 0,   # Ampere
+    0x0000D121: 7,   # VA / Watts
+    0x00001001: 0,   # second
+    0x00010001: 0,   # Kelvin
+    0x0000F001: 0,   # Hertz
+    0x00101001: 0,   # Ampere-second
+}
+
+
+def _pick(candidates: list[float], plausible) -> float:
+    """First candidate inside a plausible range, else the first candidate.
+
+    Unit exponents are where UPS firmware is least trustworthy: the same model
+    family ships 0.1 Hz and Hz frequency encodings, and Voltages appear with
+    and without the reference descriptor's exponent 7. When the intended value
+    matters (a mains voltage, a battery percentage) only one candidate can be
+    real, so prefer that one instead of trusting the descriptor blindly.
+    """
+    if plausible:
+        low, high = plausible
+        for candidate in candidates:
+            if low <= candidate <= high:
+                return candidate
+    return candidates[0]
+
+
+def _round(value, digits=0):
+    if value is None:
+        return None
+    return round(value, digits) if digits else int(round(value))
+
+
+def _minutes(seconds):
+    if seconds is None:
+        return None
+    return int(round(seconds / 60.0))
+
+
+def _test_label(value):
+    # The enumeration the Test usage declares. NUT carries the same table
+    # (drivers/usbhid-ups.c, test_read_info); 0 and anything unknown mean the
+    # device has not told us anything useful.
+    if value is None:
+        return None
+    return {1: "Passed", 2: "Warning", 3: "Error", 4: "Aborted",
+            5: "In progress", 6: "No test initiated",
+            7: "Test scheduled"}.get(int(value))
+
+
+# --------------------------------------------------------------------------
+# pwrstat (PowerPanel Personal for Linux) backend
+# --------------------------------------------------------------------------
+
+PWRSTAT_FIELDS = {
+    "Model Name": "model",
+    "Firmware Number": "firmware",
+    "Rating Voltage": "nominalVoltage",
+    "Rating Power": "ratingPower",
+    "State": "state",
+    "Power Supply by": "supply",
+    "Utility Voltage": "inputVoltage",
+    "Output Voltage": "outputVoltage",
+    "Utility Frequency": "inputFrequency",
+    "Output Frequency": "outputFrequency",
+    "Battery Capacity": "battery",
+    "Remaining Runtime": "runtimeMin",
+    "Load": "loadRaw",
+    "Line Interaction": "lineInteraction",
+    "Test Result": "testResult",
+    "Last Power Event": "lastEvent",
+}
+
+
+def parse_pwrstat_status(text: str) -> dict:
+    """Turn `pwrstat -status` text into the label -> value mapping."""
+    raw = {}
+    for line in text.splitlines():
+        if "." not in line:
+            continue
+        label, _, value = line.partition("...")
+        label = label.strip().rstrip(".").strip()
+        value = value.lstrip(".").strip()
+        if label in PWRSTAT_FIELDS:
+            raw[PWRSTAT_FIELDS[label]] = value
+    return raw
+
+
+def normalize_pwrstat(raw: dict) -> dict:
+    def number(key, digits=None):
+        if key not in raw:
+            return None
+        match = re.search(r"-?\d+(?:\.\d+)?", raw[key])
+        if not match:
+            return None
+        return round(float(match.group()), digits) if digits is not None else int(float(match.group()))
+
+    load_watts = load_percent = None
+    if "loadRaw" in raw:
+        match = re.search(r"(\d+)\s*Watt\s*\((\d+)\s*%\)", raw["loadRaw"])
+        if match:
+            load_watts, load_percent = int(match.group(1)), int(match.group(2))
+        else:
+            single = re.search(r"(\d+)\s*%", raw["loadRaw"])
+            if single:
+                load_percent = int(single.group(1))
+
+    rating_watts = rating_va = None
+    if "ratingPower" in raw:
+        match = re.search(r"(\d+)\s*Watt\s*\((\d+)\s*VA\)", raw["ratingPower"])
+        if match:
+            rating_watts, rating_va = int(match.group(1)), int(match.group(2))
+        else:
+            match = re.search(r"(\d+)\s*Watt", raw["ratingPower"])
+            if match:
+                rating_watts = int(match.group(1))
+
+    state = raw.get("state", "")
+    supply = raw.get("supply", "")
+    on_battery = "Battery" in supply or state in ("Power Failure", "Low Battery")
+    charge = number("battery")
+
+    if on_battery and charge is not None and charge <= 20:
+        status = "lowBattery"
+    elif on_battery:
+        status = "onBattery"
+    elif state == "Low Battery Restore" or (charge is not None and charge < 100):
+        status = "charging"
+    elif state == "Normal":
+        status = "online"
+    else:
+        status = "unknown"
+
+    return {
+        "source": "pwrstat",
+        "device": "pwrstatd",
+        "model": raw.get("model"),
+        "firmware": raw.get("firmware"),
+        "status": status,
+        "online": not on_battery,
+        "onBattery": on_battery,
+        "lowBattery": on_battery and (charge is not None and charge <= 20),
+        "charging": status == "charging",
+        "fullyCharged": charge == 100,
+        "replaceBattery": False,
+        "overload": "Overload" in state,
+        "boost": raw.get("lineInteraction") not in (None, "None"),
+        "battery": charge,
+        "batteryVoltage": None,
+        "runtimeMin": number("runtimeMin"),
+        "loadPercent": load_percent,
+        "loadWatts": load_watts,
+        "apparentPower": rating_va,
+        "inputVoltage": number("inputVoltage", 1),
+        "outputVoltage": number("outputVoltage", 1),
+        "inputFrequency": number("inputFrequency", 1),
+        "outputFrequency": number("outputFrequency", 1),
+        "nominalVoltage": number("nominalVoltage"),
+        "ratingWatts": rating_watts,
+        "ratingVA": rating_va,
+        "temperature": None,
+        "testResult": raw.get("testResult"),
+        "lastEvent": raw.get("lastEvent"),
+        "lineInteraction": raw.get("lineInteraction"),
+        "alarmMuted": None,
+        "updated": int(time.time()),
+    }
+
+
+def read_pwrstat() -> dict:
+    binary = _which("pwrstat")
+    if not binary:
+        raise NoDevice("pwrstat is not installed")
+    result = subprocess.run([binary, "-status"], capture_output=True, text=True, timeout=10)
+    if result.returncode != 0 or "Current UPS status" not in result.stdout:
+        message = (result.stderr or result.stdout).strip().splitlines()
+        raise NoDevice(message[-1] if message else "pwrstat did not report a status")
+    return normalize_pwrstat(parse_pwrstat_status(result.stdout))
+
+
+def control_pwrstat(action: str) -> str:
+    binary = _which("pwrstat")
+    if not binary:
+        return "pwrstat is not installed"
+    if action == "abort":
+        return "pwrstat has no way to abort a running self-test"
+    flag = {"test": "-test", "quick": "-test", "deep": "-test", "mute": "-mute"}.get(action)
+    if not flag:
+        return f"unknown action {action}"
+    result = subprocess.run([binary, flag], capture_output=True, text=True, timeout=15)
+    return (result.stdout + result.stderr).strip()
+
+
+# --------------------------------------------------------------------------
+# NUT backend
+# --------------------------------------------------------------------------
+
+NUT_STATUS = {
+    "OL": "online", "OB": "onBattery", "LB": "lowBattery", "HB": "lowBattery",
+    "CHRG": "charging", "RB": "replaceBattery", "OVER": "overload",
+    "TRIM": "boost", "BOOST": "boost", "OFF": "off", "ALARM": "alarm",
+}
+
+
+def read_nut(ups_name: str | None = None) -> dict:
+    if not _which("upsc"):
+        raise NoDevice("upsc is not installed")
+    if not ups_name:
+        listing = subprocess.run(["upsc", "-l"], capture_output=True, text=True, timeout=10)
+        names = [line.strip() for line in listing.stdout.splitlines() if line.strip()]
+        if not names:
+            raise NoDevice("no UPS is served by upsd")
+        ups_name = names[0]
+    result = subprocess.run(["upsc", ups_name], capture_output=True, text=True, timeout=10)
+    if result.returncode != 0:
+        raise NoDevice((result.stderr or result.stdout).strip() or "upsc failed")
+    values = {}
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition(":")
+        values[key.strip()] = value.strip()
+
+    def number(key, digits=None):
+        try:
+            raw = float(values[key])
+        except (KeyError, ValueError):
+            return None
+        return round(raw, digits) if digits is not None else int(round(raw))
+
+    status_codes = [code.strip() for code in values.get("ups.status", "").split()]
+    statuses = {NUT_STATUS.get(code, code.lower()) for code in status_codes}
+    on_battery = "onBattery" in statuses
+    if "replaceBattery" in statuses:
+        status = "replaceBattery"
+    elif "overload" in statuses:
+        status = "overload"
+    elif "lowBattery" in statuses:
+        status = "lowBattery"
+    elif on_battery:
+        status = "onBattery"
+    elif "charging" in statuses:
+        status = "charging"
+    else:
+        status = "online"
+
+    runtime = number("battery.runtime")
+    return {
+        "source": "nut",
+        "device": ups_name,
+        "model": values.get("ups.model") or values.get("device.model"),
+        "firmware": values.get("ups.firmware"),
+        "status": status,
+        "online": not on_battery,
+        "onBattery": on_battery,
+        "lowBattery": "lowBattery" in statuses,
+        "charging": "charging" in statuses,
+        "fullyCharged": values.get("battery.charge") == "100" and not on_battery,
+        "replaceBattery": "replaceBattery" in statuses,
+        "overload": "overload" in statuses,
+        "boost": bool(statuses & {"boost", "trim"}),
+        "battery": number("battery.charge"),
+        "batteryVoltage": number("battery.voltage", 1),
+        "runtimeMin": int(round(runtime / 60.0)) if runtime is not None else None,
+        "loadPercent": number("ups.load"),
+        "loadWatts": number("ups.realpower"),
+        "apparentPower": number("ups.power"),
+        "inputVoltage": number("input.voltage", 1),
+        "outputVoltage": number("output.voltage", 1),
+        "inputFrequency": number("input.frequency", 1),
+        "outputFrequency": number("output.frequency", 1),
+        "nominalVoltage": number("input.voltage.nominal"),
+        "temperature": number("ups.temperature", 1),
+        "testResult": values.get("ups.test.result"),
+        "lastEvent": None,
+        "alarmMuted": {"disabled": True, "muted": True}.get(values.get("ups.beeper.status")),
+        "updated": int(time.time()),
+    }
+
+
+def control_nut(action: str, ups_name: str | None = None) -> str:
+    if not _which("upscmd"):
+        return "upscmd is not installed"
+    command = {"test": "test.battery.start.quick", "quick": "test.battery.start.quick",
+               "deep": "test.battery.start.deep", "abort": "test.battery.stop",
+               "mute": "beeper.mute"}.get(action)
+    if not command:
+        return f"unknown action {action}"
+    target = ups_name or ""
+    args = ["upscmd"]
+    if target:
+        args += ["-u", "root", target]
+    else:
+        args += ["-l"]
+        return "NUT control needs an UPS name (set it in the widget settings)"
+    result = subprocess.run(args + [command], capture_output=True, text=True, timeout=15)
+    return (result.stdout + result.stderr).strip()
+
+
+# --------------------------------------------------------------------------
+# helpers and CLI
+# --------------------------------------------------------------------------
+
+class NoDevice(Exception):
+    pass
+
+
+def _which(name: str) -> str | None:
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+# --------------------------------------------------------------------------
+# Configurable settings: HID feature reports written with SET_FEATURE
+# --------------------------------------------------------------------------
+
+# Each entry is (key, label, unit, usages, choices). The settings a UPS does
+# not publish -- or marks read-only -- are simply omitted from read_config(),
+# so the same table serves every model. "choices" maps raw values to labels
+# for enum settings (the alarm, whose raw values are 1/2/3).
+CONFIG_SPECS = (
+    ("alarm", "Audible alarm", "", (U_AUDIBLE_ALARM,), {1: "disabled", 2: "enabled", 3: "muted"}),
+    ("warningLimit", "Low-battery warning at", "%", (U_WARNING_CAPACITY_LIMIT,), None),
+    ("capacityLimit", "Shut down at capacity", "%", (U_REMAINING_CAPACITY_LIMIT,), None),
+    ("runtimeLimit", "Shut down at runtime", "s", (U_REMAINING_TIME_LIMIT,), None),
+    ("lowVoltageTransfer", "Low voltage transfer", "V", (U_LOW_VOLTAGE_TRANSFER,), None),
+    ("highVoltageTransfer", "High voltage transfer", "V", (U_HIGH_VOLTAGE_TRANSFER,), None),
+    ("delayShutdown", "Delay before shutdown", "s", (U_DELAY_BEFORE_SHUTDOWN,), None),
+    ("delayStartup", "Delay before startup", "s", (U_DELAY_BEFORE_STARTUP,), None),
+)
+
+
+def read_config(device: "UpsDevice | None" = None) -> dict:
+    """The UPS's tunable settings, as published by its feature reports.
+
+    Values are reported in physical units, the same domain as the readings, so
+    a descriptor that maps a logical range through a physical one (CyberPower
+    declares the shutdown delays as logical minutes against physical seconds)
+    reads back in seconds. Writing converts back the other way.
+    """
+    if device is None:
+        device = UpsDevice.find()
+    if device is None:
+        raise NoDevice("no CyberPower UPS on a readable hidraw node")
+
+    usages = frozenset(usage for _, _, _, spec_usages, _ in CONFIG_SPECS for usage in spec_usages)
+    cache = device.read_all(usages)
+
+    settings = []
+    for key, label, unit, spec_usages, choices in CONFIG_SPECS:
+        field = device.field_for(*spec_usages)
+        if field is None:
+            continue
+        body = cache.get(field.report_id, b"")
+        raw = extract(body, field.offset, field.size) if body else None
+        logical = None if raw is None else _logical_value(field, raw)
+        value = None if logical is None else _logical_to_physical(field, logical)
+
+        # A negative logical minimum is how these descriptors spell "off"; it
+        # is a sentinel rather than a real value, so it is reported as such.
+        sentinel = logical is not None and field.log_min < 0 and logical == field.log_min
+        low = _logical_to_physical(field, field.log_min + 1 if field.log_min < 0 else field.log_min)
+        high = _logical_to_physical(field, field.log_max)
+        step = abs(_logical_to_physical(field, field.log_min + 1)
+                   - _logical_to_physical(field, field.log_min)) or 1
+
+        entry = {
+            "key": key,
+            "label": label,
+            "unit": unit,
+            "value": None if (value is None or sentinel) else round(value),
+            "min": round(low),
+            "max": round(high),
+            "step": round(step),
+            "writable": (field.flags & 0x01) == 0,
+            # A negative logical minimum is the "off" sentinel; tell callers
+            # whether they may write it back (see set_setting).
+            "offAllowed": field.log_min < 0,
+        }
+        if choices is not None:
+            entry["choices"] = {str(number): name for number, name in choices.items()}
+        if sentinel:
+            entry["valueLabel"] = "off"
+        elif choices is not None and value is not None:
+            entry["valueLabel"] = choices.get(int(round(value)))
+        settings.append(entry)
+
+    return {
+        "source": "hidraw",
+        "device": device.path,
+        "model": device.name or None,
+        "settings": settings,
+        "updated": int(time.time()),
+    }
+
+
+def set_setting(key: str, value, device: "UpsDevice | None" = None) -> tuple[bool, int]:
+    """Write one tunable setting. Returns (accepted, physical value written).
+
+    The value is clamped to the range the descriptor declares; anything else
+    would be truncated silently by the firmware.
+    """
+    spec = next((entry for entry in CONFIG_SPECS if entry[0] == key), None)
+    if spec is None:
+        raise ValueError(f"unknown setting {key!r}")
+    _, label, _, spec_usages, choices = spec
+
+    if device is None:
+        device = UpsDevice.find()
+    if device is None:
+        raise NoDevice("no CyberPower UPS on a readable hidraw node")
+
+    field = device.field_for(*spec_usages)
+    if field is None:
+        raise ValueError(f"the UPS does not expose {label.lower()}")
+    if field.flags & 0x01:
+        raise ValueError(f"{label.lower()} is read-only on this UPS")
+
+    if isinstance(value, str) and value.strip().lower() in ("off", "none"):
+        # The "off" sentinel is the negative logical minimum these descriptors
+        # declare for the shutdown delays; only those fields can be turned off.
+        if field.log_min >= 0:
+            raise ValueError(f"{label.lower()} cannot be turned off")
+        logical = field.log_min
+    else:
+        logical = _physical_to_logical(field, float(value))
+    if choices is not None and logical not in choices:
+        allowed = "/".join(str(item) for item in sorted(choices))
+        raise ValueError(f"{label.lower()} must be one of {allowed}")
+    logical = max(field.log_min, min(field.log_max, logical))
+    accepted = device.command(*spec_usages, value=logical)
+    DIAG.debug(f"set {key}={value!r}: usage 0x{spec_usages[0] & 0xFFFF:04x} "
+               f"logical {logical} -> physical {int(round(_logical_to_physical(field, logical)))} "
+               f"accepted={accepted}")
+    return accepted, int(round(_logical_to_physical(field, logical)))
+
+
+SIMULATED = {
+    "source": "simulate", "device": "/dev/hidraw9", "model": "CP1500PFCLCD",
+    "firmware": "BFH8102-6O1.5", "status": "online", "online": True,
+    "onBattery": False, "lowBattery": False, "charging": False,
+    "fullyCharged": True, "replaceBattery": False, "overload": False,
+    "boost": False, "battery": 100, "batteryVoltage": 13.6, "runtimeMin": 62,
+    "loadPercent": 14, "loadWatts": 96, "apparentPower": 148,
+    "inputVoltage": 231.0, "outputVoltage": 231.0, "inputFrequency": 50.0,
+    "outputFrequency": 50.0, "nominalVoltage": 230, "temperature": 28.0,
+    "testResult": "Passed", "lastEvent": "Blackout at 2026/10/12 21:04:11",
+    "alarmMuted": False, "updated": 0,
+}
+
+
+def collect(source: str, ups_name: str | None = None) -> dict:
+    if source == "simulate":
+        data = dict(SIMULATED)
+        data["updated"] = int(time.time())
+        return data
+    if source == "hidraw":
+        return read_hidraw()
+    if source == "pwrstat":
+        return read_pwrstat()
+    if source == "nut":
+        return read_nut(ups_name)
+
+    errors = []
+    for backend in (read_hidraw, read_pwrstat, read_nut):
+        started = time.monotonic()
+        try:
+            data = backend()
+            DIAG.debug(f"collected via {backend.__name__} in "
+                       f"{(time.monotonic() - started) * 1000:.0f} ms")
+            return data
+        except NoDevice as error:
+            errors.append(f"{backend.__name__}: {error}")
+        except Exception as error:  # a broken backend must not hide the next
+            errors.append(f"{backend.__name__}: {error!r}")
+            DIAG.debug(f"{backend.__name__} raised: {error!r}")
+    raise NoDevice("; ".join(errors))
+
+
+def dump(device: UpsDevice) -> None:
+    print(f"# {device.path}  {device.vendor:04x}:{device.product:04x}  {device.name}")
+    print(f"# report ids: {device.uses_report_ids}")
+    print("# report lengths (bits):")
+    for (rid, rtype), bits in sorted(device.report_bits.items()):
+        print(f"#   id={rid} type={rtype} {bits} bits ({(bits + 7) // 8} bytes)")
+    print("# descriptor:")
+    print("#  " + device.descriptor.hex())
+    print("# fields (feature only):")
+    for field in device.fields:
+        if field.report_type != REPORT_FEATURE:
+            continue
+        path = ".".join(f"{node >> 16:02x}:{node & 0xFFFF:04x}" for node in field.path)
+        print(f"#   {field.usage >> 16:02x}:{field.usage & 0xFFFF:04x} "
+              f"id={field.report_id} off={field.offset} size={field.size} "
+              f"log=[{field.log_min},{field.log_max}] phy=[{field.phy_min},{field.phy_max}] "
+              f"exp={field.unit_exp} path={path}")
+    print("# raw feature reports:")
+    cache = device.read_all()
+    for rid, body in sorted(cache.items()):
+        print(f"#   id={rid} {body.hex()}")
+    print(json.dumps(read_hidraw(), indent=2))
+
+
+# --------------------------------------------------------------------------
+# History: what the readings did over time
+# --------------------------------------------------------------------------
+#
+# A reading is a snapshot; this is the part that remembers. A `watch` loop (or a
+# systemd timer calling `watch --once`) samples the UPS and appends two kinds of
+# line to history.jsonl, in time order:
+#
+#   {"t":...,"kind":"sample","online":true,"inputVoltage":231.0,...}
+#   {"t":...,"kind":"event","event":"mainsLost","text":"...","level":"bad"}
+#
+# Samples are the raw series — one line per tick, in the same shape as a reading
+# so consecutive lines can be compared directly. Events are the transitions
+# between them: mains lost and restored, the AVR boosting, the battery going
+# low, the input voltage leaving its band. That is the same split PowerPanel
+# uses (a daemon logging events), minus the daemon being mandatory: run the
+# bundled systemd unit to keep it on, or record only while something polls.
+
+HISTORY_NAME = "history.jsonl"
+HISTORY_MAX_BYTES = 2 * 1024 * 1024
+VOLTAGE_BAND = 10.0          # percent from nominal that still counts as normal
+
+#: The reading fields a sample keeps. Everything else in a reading is either
+#: constant (model, device) or derived, and would only bloat the file.
+SAMPLE_KEYS = ("online", "onBattery", "lowBattery", "boost", "overload",
+               "replaceBattery", "inputVoltage", "outputVoltage",
+               "inputFrequency", "loadPercent", "loadWatts", "battery",
+               "runtimeMin", "nominalVoltage", "testResult")
+
+
+def history_path() -> str:
+    return os.path.join(state_dir(), HISTORY_NAME)
+
+
+def read_history() -> list[dict]:
+    """Every line we managed to parse, in file order; damage is skipped."""
+    records = []
+    try:
+        with open(history_path(), encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return records
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            DIAG.debug("skipping an unreadable history line")
+            continue
+        if isinstance(record, dict) and "t" in record and "kind" in record:
+            records.append(record)
+    return records
+
+
+def append_history(records: list[dict]) -> None:
+    if not records:
+        return
+    path = history_path()
+    text = "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in records)
+    try:
+        os.makedirs(state_dir(), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(text)
+    except OSError as error:
+        DIAG.debug(f"cannot append to the history: {error}")
+        return
+    _trim_history(path)
+
+
+def _trim_history(path: str) -> None:
+    """Keep the file bounded by dropping the oldest half, not the newest."""
+    try:
+        if os.path.getsize(path) <= HISTORY_MAX_BYTES:
+            return
+        with open(path, encoding="utf-8") as handle:
+            lines = handle.readlines()
+        keep = lines[len(lines) // 2:]
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.writelines(keep)
+        DIAG.debug(f"history trimmed to the newest {len(keep)} line(s)")
+    except OSError:
+        pass
+
+
+def sample_record(data: dict) -> dict:
+    record = {key: data.get(key) for key in SAMPLE_KEYS}
+    record["t"] = int(data.get("updated") or time.time())
+    record["kind"] = "sample"
+    return record
+
+
+def _event(name: str, text: str, level: str, at: int) -> dict:
+    return {"t": at, "kind": "event", "event": name, "text": text, "level": level}
+
+
+#: flag -> (event, text when it starts, text when it ends, level). An empty end
+#: text means the condition only ever has one line.
+TRANSITIONS = (
+    ("onBattery", "onBattery", "Running on battery", "Back on mains power", "warn"),
+    ("lowBattery", "lowBattery", "Battery low", "Battery charge recovered", "bad"),
+    ("boost", "boost", "Automatic voltage regulation: boosting",
+     "Voltage regulation ended", "warn"),
+    ("overload", "overload", "Output overloaded", "Overload cleared", "bad"),
+    ("replaceBattery", "replaceBattery", "Battery needs replacing", "", "bad"),
+)
+
+
+def _outside_band(volts, nominal, band: float) -> bool:
+    if not nominal or not isinstance(volts, (int, float)) or volts <= 0:
+        return False
+    return abs(volts - nominal) > nominal * band / 100.0
+
+
+def events_between(previous: dict | None, current: dict, band: float = VOLTAGE_BAND) -> list[dict]:
+    """The transitions worth a line between two consecutive readings."""
+    if not previous:
+        return []
+    at = int(current.get("updated") or time.time())
+    events: list[dict] = []
+
+    def add(name, text, level):
+        events.append(_event(name, text, level, at))
+
+    volts = current.get("inputVoltage")
+    shown = f"{volts:.0f} V" if isinstance(volts, (int, float)) else "no reading"
+
+    if previous.get("online") and not current.get("online"):
+        add("mainsLost", f"Mains power lost (input {shown})", "bad")
+    elif not previous.get("online") and current.get("online"):
+        add("mainsRestored", f"Mains power restored (input {shown})", "info")
+
+    for field, name, start_text, end_text, level in TRANSITIONS:
+        if not previous.get(field) and current.get(field):
+            add(name, start_text, level)
+        elif previous.get(field) and not current.get(field) and end_text:
+            add(f"{name}End", end_text, "info")
+
+    nominal = current.get("nominalVoltage") or previous.get("nominalVoltage")
+    was_out = _outside_band(previous.get("inputVoltage"), nominal, band)
+    now_out = _outside_band(volts, nominal, band)
+    if now_out and not was_out:
+        side = "high" if volts > nominal else "low"
+        add(f"voltage{side.capitalize()}",
+            f"Input voltage {'above' if side == 'high' else 'below'} "
+            f"{band:g}% of nominal: {shown}", "warn")
+    elif was_out and not now_out:
+        add("voltageNormal", f"Input voltage back to normal: {shown}", "info")
+
+    result = current.get("testResult")
+    if result and previous.get("testResult") != result:
+        add("testResult", f"Self-test finished: {result}", "info")
+
+    return events
+
+
+def watch(interval: float, source: str, ups_name: str | None, once: bool,
+          band: float = VOLTAGE_BAND) -> int:
+    """Sample the UPS, appending samples and events to the history.
+
+    Meant to be left running (or called by a timer): a read that fails records
+    one line and then keeps trying, rather than ending the log with a traceback.
+    """
+    previous = next((record for record in reversed(read_history())
+                     if record.get("kind") == "sample"), None)
+    if previous is None:
+        DIAG.debug("watch: no earlier sample, events start from the second tick")
+    unreadable = False
+
+    def trouble(name: str, message: str) -> None:
+        nonlocal unreadable
+        if not unreadable:              # one line per outage, not one per tick
+            append_history([_event(name, message, "bad", int(time.time()))])
+            print(message, file=sys.stderr)
+            unreadable = True
+
+    while True:
+        try:
+            data = collect(source, ups_name)
+        except NoDevice as error:
+            trouble("deviceLost", f"UPS not readable: {error}")
+            if once:
+                return 2
+            time.sleep(interval)
+            continue
+        except Exception as error:      # noqa: BLE001 - a bad read must not end the log
+            DIAG.debug(f"watch: {type(error).__name__}: {error}")
+            trouble("readerError", f"Reading the UPS failed: {error}")
+            if once:
+                return 2
+            time.sleep(interval)
+            continue
+
+        if unreadable:
+            append_history([_event("deviceBack", "UPS readable again", "info",
+                                   int(time.time()))])
+            unreadable = False
+
+        records = events_between(previous, data, band)
+        append_history([sample_record(data)] + records)
+        for record in records:
+            print(f"{time.strftime('%H:%M:%S', time.localtime(record['t']))}  "
+                  f"{record['text']}", flush=True)
+        DIAG.debug(f"watch: input {data.get('inputVoltage')} V, "
+                   f"load {data.get('loadPercent')} %, battery {data.get('battery')} %")
+        previous = data
+
+        if once:
+            return 0
+        try:
+            time.sleep(interval)
+        except KeyboardInterrupt:
+            return 0
+
+
+def select_history(records: list[dict], limit: int | None, since_minutes: float | None,
+                   events_only: bool) -> list[dict]:
+    """The tail of the history, optionally narrowed to events or a time window."""
+    if events_only:
+        records = [record for record in records if record.get("kind") == "event"]
+    if since_minutes is not None:
+        cutoff = time.time() - since_minutes * 60
+        records = [record for record in records if record.get("t", 0) >= cutoff]
+    if limit and limit > 0:
+            records = records[-limit:]
+    return records
+
+
+def print_history(records: list[dict], as_json: bool) -> None:
+    for record in records:
+        if as_json:
+            print(json.dumps(record))
+            continue
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record.get("t", 0)))
+        if record.get("kind") == "event":
+            print(f"{when}  {'':4}  {record.get('text')}")
+        else:
+            print(f"{when}  {record.get('inputVoltage')} V in   "
+                  f"{record.get('outputVoltage')} V out   "
+                  f"{record.get('loadPercent')} % load   "
+                  f"battery {record.get('battery')} %")
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(prog="cyberpower-ups", description=__doc__.splitlines()[0])
+    parser.add_argument("action", nargs="?", default="status",
+                        choices=["status", "test", "quick", "deep", "abort", "mute",
+                                 "config", "set", "dump", "probe", "watch", "history"])
+    parser.add_argument("extra", nargs="*",
+                        help="for 'set': KEY VALUE (see 'config' for the keys)")
+    parser.add_argument("--source", default="auto",
+                        choices=["auto", "hidraw", "pwrstat", "nut", "simulate"])
+    parser.add_argument("--ups", default=None, help="NUT UPS name")
+    parser.add_argument("--pretty", action="store_true", help="indent the JSON")
+    parser.add_argument("--interval", type=float, default=60.0,
+                        help="watch: seconds between samples")
+    parser.add_argument("--once", action="store_true",
+                        help="watch: take a single sample and exit, for a systemd timer")
+    parser.add_argument("--band", type=float, default=VOLTAGE_BAND,
+                        help="watch: input voltage band, as a percent of nominal")
+    parser.add_argument("--limit", type=int, default=40,
+                        help="history: how many records to show (0 for all)")
+    parser.add_argument("--since", type=float, default=None,
+                        help="history: only records from the last MINUTES")
+    parser.add_argument("--events", action="store_true",
+                        help="history: events only, no samples")
+    parser.add_argument("--json", action="store_true",
+                        help="history: raw JSON lines instead of a table")
+    parser.add_argument("--debug", action="store_true",
+                        help="append every device read and write to the debug trace")
+    args = parser.parse_args(argv)
+
+    DIAG.debug_enabled = args.debug or bool(os.environ.get("CYBERPOWER_UPS_DEBUG"))
+    DIAG.echo = args.debug
+    effective = list(argv) if argv is not None else sys.argv[1:]
+    DIAG.debug(" ".join(effective) or args.action)
+
+    try:
+        if args.action == "watch":
+            return watch(args.interval, args.source, args.ups, args.once, args.band)
+
+        if args.action == "history":
+            records = select_history(read_history(), args.limit, args.since, args.events)
+            print_history(records, args.json)
+            return 0
+
+        if args.action == "config":
+            if args.source == "simulate":
+                raise NoDevice("the simulate source cannot be configured")
+            print(json.dumps(read_config(), indent=2 if args.pretty else None))
+            return 0
+
+        if args.action == "set":
+            if args.source == "simulate":
+                raise NoDevice("the simulate source cannot be configured")
+            if len(args.extra) != 2:
+                print("usage: cyberpower-ups set KEY VALUE", file=sys.stderr)
+                return 2
+            key, value = args.extra
+            accepted, applied = set_setting(key, value)
+            if not accepted:
+                print("the UPS rejected that setting")
+                return 1
+            turned_off = isinstance(value, str) and value.strip().lower() in ("off", "none")
+            print(f"{key} = off" if turned_off else f"{key} = {applied}")
+            return 0
+
+        if args.action == "dump" or args.action == "probe":
+            device = UpsDevice.find()
+            if device is None:
+                message = "no CyberPower UPS found on a readable hidraw node"
+                hint = ("hint: install the bundled udev rule (see udev/) so the "
+                        "logged-in user may open /dev/hidraw*")
+                if args.action == "probe":
+                    print(message)
+                    print(hint)
+                    return 2
+                raise NoDevice(f"{message}; {hint}")
+            dump(device)
+            return 0
+
+        if args.action in ("test", "quick", "deep", "abort", "mute"):
+            if args.source in ("pwrstat", "auto") and _which("pwrstat"):
+                print(control_pwrstat(args.action))
+                return 0
+            if args.source == "nut" or _which("upscmd"):
+                print(control_nut(args.action, args.ups))
+                return 0
+            device = UpsDevice.find()
+            if device is None:
+                raise NoDevice("no UPS to send a command to")
+            if args.action == "mute":
+                ok = device.command(U_AUDIBLE_ALARM, value=3)
+            elif args.action == "abort":
+                ok = device.command(U_TEST, value=3)
+            elif args.action == "deep":
+                ok = device.command(U_TEST, value=2)
+            else:
+                ok = device.command(U_TEST, value=1)
+            print("sent" if ok else "the UPS does not expose that command")
+            return 0
+
+        data = collect(args.source, args.ups)
+        print(json.dumps(data, indent=2 if args.pretty else None))
+        return 0
+    except NoDevice as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    except Exception as error:
+        # stderr is usually thrown away (the widget reads stdout), so keep the
+        # traceback where it can be found later.
+        path = DIAG.crash(error)
+        print(f"{type(error).__name__}: {error}", file=sys.stderr)
+        print(f"traceback written to {path}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
