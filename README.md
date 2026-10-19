@@ -73,7 +73,11 @@ Two things do need Python and Omarchy:
 
    Otherwise copy the folder to
    `~/.config/omarchy/plugins/io.github.kamil.cyberpower-ups/` (it is already
-   there if you are reading this in place). The widget does not care where it
+   there if you are reading this in place). A *symlink* to a checkout works for
+   the shell, which loads the widget from it, but `omarchy plugin add` and
+   `omarchy plugin update` refuse a plugin folder that contains one ("symlinks
+   are not allowed inside a plugin folder"), so use a copy if you want the
+   tooling to manage it. The widget does not care where it
    lives — it resolves `bin/` next to itself — but Omarchy installs a plugin
    under a directory named after the manifest's `id`, and the bundled systemd
    unit names that path. If you fork this and give it your own id, change it in
@@ -86,6 +90,15 @@ Two things do need Python and Omarchy:
 
    ```bash
    sudo udev/install.sh
+   ```
+
+   The script copies the rule through a root-owned temporary file before it
+   lands in `/etc`, and it is safe to run again. If you would rather not run
+   a script from this directory as root, install the rule yourself:
+
+   ```bash
+   sudo install -m 0644 udev/60-cyberpower-ups.rules /etc/udev/rules.d/
+   sudo udevadm control --reload
    ```
 
    Then re-plug the UPS or run `sudo udevadm trigger --subsystem-match=hidraw`.
@@ -300,7 +313,8 @@ journalctl --user -u cyberpower-ups-watch -f      # events as they happen
 If you installed the plugin somewhere other than
 `~/.config/omarchy/plugins/io.github.kamil.cyberpower-ups/`, edit the unit's
 `ExecStart=` to point at your copy — it is the one place in the project that
-names its own location. If this machine talks to the UPS through pwrstat or NUT
+names its own location — and the `ConditionPathExists=` line above it, which
+names the same path and stops the unit from retrying a path that is not there. If this machine talks to the UPS through pwrstat or NUT
 rather than hidraw, add `--source pwrstat` or `--ups NAME`; `--listen` will then
 step aside and poll instead, since only the HID endpoint has reports to read.
 
@@ -348,8 +362,8 @@ status flags does the same.
 
 Both programs keep their traces in `~/.local/state/cyberpower-ups/`
 (`$XDG_STATE_HOME` is honoured), because neither one is usually watched: the bar
-widget reads the reader's stdout and throws its stderr away, and the panel runs
-in a terminal that closes the moment it exits.
+widget reads the reader's stdout and only shows its stderr when the reader
+fails, and the panel runs in a terminal that closes the moment it exits.
 
 | File | Written when | Holds |
 | ---- | ------------ | ----- |

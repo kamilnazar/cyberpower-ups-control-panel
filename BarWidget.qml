@@ -21,9 +21,15 @@ BarWidget {
   property string errorText: ""
   property bool popupOpen: false
   property string actionMessage: ""
+  // Whether the last poll ever ran, and whether it ever ended. A poll that
+  // starts and never ends means the reader could not be started at all.
+  property bool pollStarted: false
+  property bool pollFinished: false
 
-  readonly property string reader: String(Qt.resolvedUrl("bin/cyberpower-ups")).replace("file://", "")
-  readonly property string tui: String(Qt.resolvedUrl("bin/cyberpower-ups-tui")).replace("file://", "")
+  readonly property string reader: decodeURIComponent(
+    String(Qt.resolvedUrl("bin/cyberpower-ups")).replace("file://", ""))
+  readonly property string tui: decodeURIComponent(
+    String(Qt.resolvedUrl("bin/cyberpower-ups-tui")).replace("file://", ""))
 
   // The reader speaks in lowercase tokens; the settings UI shows prose.
   readonly property string source: {
@@ -35,11 +41,11 @@ BarWidget {
     return "auto"
   }
 
-  readonly property int intervalSec: Math.max(5, Number(root.setting("intervalSec", 15)) || 15)
+  readonly property int intervalSec: Math.max(5, root.numberSetting("intervalSec", 15))
   readonly property bool showPercent: root.boolSetting("showPercent", true)
   readonly property string upsName: String(root.setting("upsName", "") || "")
-  readonly property int warnBattery: Number(root.setting("warnBattery", 30)) || 30
-  readonly property int criticalBattery: Number(root.setting("criticalBattery", 15)) || 15
+  readonly property int warnBattery: root.numberSetting("warnBattery", 30)
+  readonly property int criticalBattery: root.numberSetting("criticalBattery", 15)
   readonly property string iconPreset: String(root.setting("iconPreset", "Auto") || "Auto")
   readonly property bool showTestControls: root.boolSetting("showTestControls", true)
   readonly property bool debug: root.boolSetting("debug", false)
@@ -90,6 +96,14 @@ BarWidget {
     return fallback
   }
 
+  // The same for numbers: a stored "0" is a number, not a missing value.
+  function numberSetting(key, fallback) {
+    var value = root.setting(key, fallback)
+    if (typeof value === "string" && value.trim() === "") return fallback
+    var number = Number(value)
+    return isFinite(number) ? number : fallback
+  }
+
   function statusLabel() {
     return {
       online: "On utility power",
@@ -118,7 +132,22 @@ BarWidget {
   // ---------------------------------------------------------------- polling
 
   function refresh() {
-    if (!statusProc.running) statusProc.running = true
+    if (statusProc.running) return
+    if (root.pollStarted && !root.pollFinished) {
+      // The process went away without ever exiting: Quickshell could not
+      // start it, which means the reader is missing or not executable.
+      // Say that, instead of "nothing has reported yet".
+      root.status = null
+      root.errorText = "cannot run " + root.reader
+      root.pollStarted = false
+      return
+    }
+    // The command is set here rather than bound, so a settings change takes
+    // effect at the next poll instead of restarting a read in flight.
+    statusProc.command = root.commandFor("")
+    root.pollStarted = true
+    root.pollFinished = false
+    statusProc.running = true
   }
 
   // PopupCard calls owner.close() when the user clicks outside the card.
@@ -159,7 +188,7 @@ BarWidget {
 
   Process {
     id: statusProc
-    command: root.commandFor("")
+    command: []
     stdout: StdioCollector {
       id: statusOut
       waitForEnd: true
@@ -169,6 +198,7 @@ BarWidget {
       waitForEnd: true
     }
     onExited: function(code) {
+      root.pollFinished = true
       var out = String(statusOut.text || "").trim()
       if (code === 0 && out !== "") {
         try {

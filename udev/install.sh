@@ -13,7 +13,14 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-install -m 0644 "$here/$rule" "$target"
+# The rule is copied to a root-owned temporary file first, and installed from
+# there. A udev rule can run commands, so what lands in /etc should be a
+# snapshot of the file rather than a symlink into a directory the user owns.
+staging="$(mktemp /tmp/cyberpower-ups-rules.XXXXXX)"
+trap 'rm -f "$staging"' EXIT
+install -m 0644 "$here/$rule" "$staging"
+install -m 0644 "$staging" "$target"
+
 udevadm control --reload
 udevadm trigger --subsystem-match=hidraw
 

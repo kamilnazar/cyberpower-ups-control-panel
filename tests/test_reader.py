@@ -158,7 +158,7 @@ def fake_device(reports, product=0x0501):
     device.fields, device.report_bits, device.uses_report_ids = fields, bits, numbered
     device.descriptor = build_descriptor()
     device._reports = reports
-    device._read_report = lambda rid, rtype: device._reports.get(rid, b"")
+    device._read_report = lambda rid, rtype, fd=None: device._reports.get(rid, b"")
     return device
 
 
@@ -448,18 +448,23 @@ def test_pushed_flags_refuse_a_truncated_report():
 
 def test_a_write_is_refused_when_the_report_cannot_be_read():
     """A body that was not read back would zero every other field."""
-    device = fake_device({})
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "hidraw")
+        with open(path, "wb"):
+            pass
+        device = fake_device({})
+        device.path = path                   # the node opens; the read fails
 
-    def failing(report_id, report_type):
-        raise OSError("no such device")
+        def failing(report_id, report_type, fd=None):
+            raise OSError("no such device")
 
-    device._read_report = failing
-    try:
-        device.command(ups.U_AUDIBLE_ALARM, value=3)
-    except ups.NoDevice as error:
-        assert "nothing was written" in str(error), error
-    else:
-        raise AssertionError("the write should have been refused")
+        device._read_report = failing
+        try:
+            device.command(ups.U_AUDIBLE_ALARM, value=3)
+        except ups.NoDevice as error:
+            assert "nothing was written" in str(error), error
+        else:
+            raise AssertionError("the write should have been refused")
 
 
 def test_nut_high_battery_is_not_a_low_battery():

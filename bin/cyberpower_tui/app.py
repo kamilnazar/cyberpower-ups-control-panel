@@ -283,6 +283,9 @@ class SettingsTab(Tab):
     def draw(self, top, height, width):
         app, screen, theme = self.app, self.app.screen, self.app.theme
         settings = app.settings
+        # The click targets are cleared first: a failed read leaves no rows,
+        # and a click must not land on a row that is no longer there.
+        self.hits = []
         if not settings:
             if app.settings_error:
                 text, attr = app.settings_error, theme.bad
@@ -293,12 +296,13 @@ class SettingsTab(Tab):
             W.put(screen, top + 1, 3, W.clip(text, width - 6), attr)
             return
 
+        self.cursor = max(0, min(self.cursor, len(settings) - 1))
+
         W.put(screen, top, SETTINGS_LABEL_X, W.pad("Setting", SETTINGS_LABEL_W),
               theme.muted | curses.A_BOLD)
         W.put(screen, top, SETTINGS_VALUE_X, W.pad("Value", SETTINGS_VALUE_W),
               theme.muted | curses.A_BOLD)
         W.put(screen, top, SETTINGS_ALLOWED_X, "Range", theme.muted | curses.A_BOLD)
-        self.hits = []
 
         first, stop = self.window(height - 3)
         for index in range(first, stop):
@@ -551,6 +555,9 @@ class HistoryTab(Tab):
         app, screen, theme = self.app, self.app.screen, self.app.theme
         limit = top + height
         row = top + 1
+        # The click targets are cleared first: a failed read leaves no rows,
+        # and a click must not land on a row that is no longer there.
+        self.hits = []
 
         if app.history_error:
             W.put(screen, row, 3, W.clip(app.history_error, width - 6), theme.bad)
@@ -581,7 +588,6 @@ class HistoryTab(Tab):
             row += 2
 
         events = app.events
-        self.hits = []
         self._follow_anchor()
         self.cursor = max(0, min(self.cursor, len(events) - 1))
         if row < limit:

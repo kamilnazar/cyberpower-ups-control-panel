@@ -2,8 +2,16 @@
 Description=CyberPower UPS history recorder
 Documentation=file:%h/.config/omarchy/plugins/io.github.kamil.cyberpower-ups/README.md
 # The recorder opens /dev/hidraw* itself, so it wants the bundled udev rule
-# (udev/60-cyberpower-ups.rules) installed for the logged-in user.
+# (udev/60-cyberpower-ups.rules) installed for the logged-in user. The seat
+# sets that rule up, so the recorder waits for the session rather than
+# starting before the node is readable.
 After=graphical-session.target
+Wants=graphical-session.target
+# A plugin installed somewhere else needs this path changed too.
+ConditionPathExists=%h/.config/omarchy/plugins/io.github.kamil.cyberpower-ups/bin/cyberpower-ups
+# A wrong path should not be retried forever.
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple

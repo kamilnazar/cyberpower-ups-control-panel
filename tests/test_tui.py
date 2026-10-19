@@ -780,6 +780,50 @@ def test_stale_write_reply_is_ignored():
     assert app.setting("runtimeLimit")["value"] == 302, app.setting("runtimeLimit")
 
 
+def test_a_failed_read_leaves_no_stale_click_targets():
+    """A click after a failed read must not land on a row that is gone."""
+    screen = FakeScreen(28, 96)
+    backend = StubBackend(status=STATUS, settings=SETTINGS)
+    app = App(screen, backend, worker=SyncWorker(backend))
+    app.settings = copy.deepcopy(list(SETTINGS))
+    tab = app.tabs[2]
+    app.tab_index = 2
+    app.draw()
+    assert tab.hits, "the rows should be clickable"
+
+    app.settings = []                              # the read failed
+    app.settings_error = "the UPS did not answer"
+    app.draw()
+    assert tab.hits == [], tab.hits
+    assert tab.cursor == 0, tab.cursor
+
+
+def test_the_stale_reply_arriving_last_is_ignored():
+    """The reply for a value the user moved past must not win, even if it
+    is the last one to arrive."""
+    screen = FakeScreen(28, 96)
+    backend = StubBackend(status=STATUS, settings=SETTINGS)
+    worker = ManualWorker()
+    app = App(screen, backend, worker=worker)
+    app.settings = copy.deepcopy(list(SETTINGS))
+    tab = app.tabs[2]
+    tab.cursor = 1
+
+    tab.stage()                                     # sequence 1: 301
+    tab.stage(1)
+    tab.commit()
+    tab.stage()                                     # sequence 2: 302
+    tab.stage(1)
+    tab.commit()
+    worker.run(1)                                   # the newer reply first
+    app._drain()
+    assert app.setting("runtimeLimit")["value"] == 302, app.setting("runtimeLimit")
+
+    worker.run(0)                                   # the stale reply arrives last
+    app._drain()
+    assert app.setting("runtimeLimit")["value"] == 302, app.setting("runtimeLimit")
+
+
 def test_a_read_in_flight_does_not_undo_a_write():
     """A settings read that was already on its way must not undo a write."""
     screen = FakeScreen(28, 96)

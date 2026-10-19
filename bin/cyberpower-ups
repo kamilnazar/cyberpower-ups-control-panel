@@ -446,6 +446,19 @@ def hidraw_set_feature(fd: int, report_id: int, body: bytes) -> None:
     fcntl.ioctl(fd, request, buf, False)
 
 
+def _lock_device(fd: int) -> None:
+    """Take the node's write lock, so two writers do not tread on each other.
+
+    The lock is on the device node itself, which every reader of the same
+    node shares. Only writers take it: a reader must never be made to wait
+    for a write that is not its business.
+    """
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError:
+        pass                                   # a node that cannot be locked
+
+
 class UpsDevice:
     """A CyberPower UPS found on a hidraw node."""
 
@@ -532,16 +545,20 @@ class UpsDevice:
 
     # -- reads ------------------------------------------------------------
 
-    def _read_report(self, report_id: int, report_type: int) -> bytes:
+    def _read_report(self, report_id: int, report_type: int,
+                     fd: int | None = None) -> bytes:
         bits = self.report_bits.get((report_id, report_type), 0)
         length = (bits + 7) // 8
-        fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK)
+        own = fd is None
+        if own:
+            fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK)
         try:
             if report_type != REPORT_FEATURE:
                 raise SystemExit("only feature reports are supported")
             return hidraw_get_feature(fd, report_id, length)
         finally:
-            os.close(fd)
+            if own:
+                os.close(fd)
 
     def read_all(self, usages=None) -> dict[int, bytes]:
         """Read this device's feature reports, optionally only the wanted ones.
@@ -613,27 +630,34 @@ class UpsDevice:
     def command(self, *usages, value: int) -> bool:
         for field in self.fields:
             if field.usage in usages and field.report_type == REPORT_FEATURE:
-                try:
-                    body = bytearray(self._read_report(field.report_id, REPORT_FEATURE))
-                except OSError as error:
-                    # A write carries the whole report, so sending a body that
-                    # was not read back would zero every other field in it --
-                    # on this UPS the shutdown thresholds share a report with
-                    # other settings. Refuse the write instead.
-                    raise NoDevice(
-                        f"report 0x{field.report_id:02x} could not be read "
-                        f"({error}); nothing was written") from error
-                while len(body) < (field.offset + field.size + 7) // 8:
-                    body.append(0)
-                for bit in range(field.size):
-                    pos = field.offset + bit
-                    mask = 1 << (pos & 7)
-                    if (value >> bit) & 1:
-                        body[pos >> 3] |= mask
-                    else:
-                        body[pos >> 3] &= ~mask & 0xFF
+                # The write carries the whole report, so reading it and
+                # writing it back has to be one step: another writer (the
+                # panel and the bar widget can both write) would otherwise
+                # put its own value in the report in between. The lock is
+                # only taken around writes, so a reader is never delayed.
                 fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK)
                 try:
+                    _lock_device(fd)
+                    try:
+                        body = bytearray(
+                            self._read_report(field.report_id, REPORT_FEATURE, fd=fd))
+                    except OSError as error:
+                        # A body that was not read back would zero every
+                        # other field in the report -- on this UPS the
+                        # shutdown thresholds share a report with other
+                        # settings. Refuse the write instead.
+                        raise NoDevice(
+                            f"report 0x{field.report_id:02x} could not be read "
+                            f"({error}); nothing was written") from error
+                    while len(body) < (field.offset + field.size + 7) // 8:
+                        body.append(0)
+                    for bit in range(field.size):
+                        pos = field.offset + bit
+                        mask = 1 << (pos & 7)
+                        if (value >> bit) & 1:
+                            body[pos >> 3] |= mask
+                        else:
+                            body[pos >> 3] &= ~mask & 0xFF
                     hidraw_set_feature(fd, field.report_id, bytes(body))
                 finally:
                     os.close(fd)
@@ -717,10 +741,10 @@ def read_hidraw(device: "UpsDevice | None" = None) -> dict:
     if out_freq is None:
         out_freq = in_freq
 
-    # Some models (product 0x0501) report battery voltage 1.5x too high.
-    if batt_volt is not None and nominal_volt:
-        if nominal_volt > 0 and batt_volt / nominal_volt > 1.4:
-            batt_volt = batt_volt * 2 / 3
+    # The battery voltage is used as the device gives it. NUT knows of
+    # CyberPower models that under-declare a field's Logical Maximum, so the
+    # value arrives clipped; that is a descriptor problem, not a fixed
+    # factor, and this reader does not second-guess the number.
 
     if charge is not None:
         charge = max(0.0, min(100.0, charge))
@@ -1580,6 +1604,26 @@ def pushed_flags(device: "UpsDevice", cache: dict[int, bytes],
     return tuple(int(flags.get(usage, 0)) for usage in LISTEN_FLAGS)
 
 
+def _reopen_endpoint(device: "UpsDevice", old_fd: int) -> int:
+    """Open the interrupt endpoint again after the device refused a read.
+
+    A control transfer that timed out can leave the device refusing every
+    read on the node (EIO). Reopening it is enough to carry on, and the
+    baseline of what has been seen is kept, so a change that happened during
+    the outage is not missed.
+    """
+    try:
+        os.close(old_fd)
+    except OSError:
+        pass
+    for _ in range(5):
+        try:
+            return os.open(device.path, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            time.sleep(0.2)
+    raise NoDevice(f"the UPS at {device.path} stopped answering")
+
+
 def _listen_loop(rec: Recorder, interval: float, device: "UpsDevice") -> None:
     """Read the device's own reports until something goes wrong.
 
@@ -1600,6 +1644,11 @@ def _listen_loop(rec: Recorder, interval: float, device: "UpsDevice") -> None:
                 try:
                     body = os.read(fd, 64)
                 except BlockingIOError:
+                    continue
+                except OSError as error:
+                    DIAG.debug(f"listen: the endpoint failed ({error}); reopening it")
+                    cache = {}
+                    fd = _reopen_endpoint(device, fd)
                     continue
                 if not body:            # unplugged: hidraw hands us EOF
                     raise NoDevice("the UPS stopped answering on its endpoint")
@@ -1623,7 +1672,10 @@ def _listen_loop(rec: Recorder, interval: float, device: "UpsDevice") -> None:
                 rec.record(read_hidraw(device))
                 next_full = now + interval
     finally:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def listen_for_pushes(rec: Recorder, interval: float, source: str,
