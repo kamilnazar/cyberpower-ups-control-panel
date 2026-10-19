@@ -33,6 +33,21 @@ KEY_BTAB = getattr(curses, "KEY_BTAB", -1)
 ENTER_KEYS = ("\n", "\r", curses.KEY_ENTER)
 BACKSPACE_KEYS = (curses.KEY_BACKSPACE, 127, 8)
 
+#: How often to look at the history log while the History tab is showing.
+#: Reading the log costs a whole process, so a stat gates it: the tab only
+#: re-reads when the recorder actually appended something. That is cheap
+#: enough to look this often, and it makes the tab current within a second of
+#: a new line instead of waiting for a fixed timer.
+HISTORY_CHECK = 1.0
+
+
+def _history_mtime() -> int | None:
+    """The history log's modification time, or None when there is no log yet."""
+    try:
+        return os.stat(DIAG.path("history.jsonl")).st_mtime_ns
+    except OSError:
+        return None
+
 
 def _setting_row(label: str, value: str, allowed: str, width: int) -> str:
     """Compose one settings row at fixed columns so it aligns when selected."""
@@ -474,8 +489,8 @@ class HistoryTab(Tab):
         return "↑/↓ scroll   r reload   ←/→ tabs   q quit"
 
     def on_show(self) -> None:
-        if not self.app.history and not self.app.history_error:
-            self.app.request_history()
+        # Always re-read: the recorder may well have appended since last time.
+        self.app.request_history()
 
     def handle(self, key) -> bool:
         if self.is_down(key):
@@ -725,6 +740,8 @@ class App:
         self._status_pending = False
         self._settings_pending = False
         self._history_pending = False
+        self._history_checked = 0.0
+        self._history_seen: int | None = None
         self._last_input = 0.0
         self._set_sequence: dict[str, int] = {}
         self._set_base: dict[str, tuple] = {}
@@ -776,7 +793,22 @@ class App:
         if self._history_pending and not force:
             return
         self._history_pending = True
+        self._history_checked = time.monotonic()
+        self._history_seen = _history_mtime()
         self.worker.submit("history", self.backend.history)
+
+    def _poll_history(self, now: float) -> None:
+        """Re-read the log when the recorder has appended to it.
+
+        The stat is what makes this affordable: a read is a process, so it
+        only happens when the file actually moved. See HISTORY_CHECK.
+        """
+        if now - self._history_checked < HISTORY_CHECK:
+            return
+        self._history_checked = now
+        stamp = _history_mtime()
+        if stamp is not None and stamp != self._history_seen:
+            self.request_history()
 
     def _maybe_poll(self) -> None:
         """Timers that run when a key is not waiting: confirm writes, then poll."""
@@ -789,6 +821,8 @@ class App:
             return
         if now - self._status_requested >= self.interval:
             self.request_status()
+        if isinstance(self.tab, HistoryTab):
+            self._poll_history(now)
 
     # ----------------------------------------------------------- writes
     def run_action(self, key: str) -> None:

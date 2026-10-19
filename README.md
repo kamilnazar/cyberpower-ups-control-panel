@@ -143,7 +143,7 @@ line.
 | **Status** | a battery gauge, the power path (mains → UPS → load) and every reading |
 | **Controls** | run a quick/deep battery test, abort one, mute the alarm |
 | **Settings** | every tunable setting the UPS publishes, edited in two steps |
-| **History** | the input voltage as a sparkline, then the events the recorder logged |
+| **History** | the input voltage as a sparkline, then the events the recorder logged; follows the log live |
 | **About** | where the readings come from, and the key help |
 
 | Key | Action |
@@ -247,7 +247,9 @@ A reading is a snapshot; PowerPanel's log comes from its `pwrstatd` daemon
 writing `/var/log/pwrstatd.log`. This does the same job without making a daemon
 mandatory: `watch` samples the UPS and appends to
 `~/.local/state/cyberpower-ups/history.jsonl`, and the **History** tab reads it
-back.
+back. While that tab is on screen it stats the file once a second and re-reads
+it only when the recorder actually appended, so a new sample or event shows up
+within about a second without spending a process per tick.
 
 Two kinds of line, both with a `t` timestamp, in time order:
 

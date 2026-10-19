@@ -24,6 +24,7 @@ sys.path.insert(0, BIN)
 
 from cyberpower_tui import formats as F           # noqa: E402
 from cyberpower_tui import widgets as W           # noqa: E402
+from cyberpower_tui import app as app_module      # noqa: E402
 from cyberpower_tui.app import App, EditDialog    # noqa: E402
 from cyberpower_tui.backend import Backend, BackendError  # noqa: E402
 from cyberpower_tui.worker import SyncWorker, Worker       # noqa: E402
@@ -907,7 +908,7 @@ def test_history_tab_survives_a_shrinking_log():
     assert tab.count() == 2 and tab.cursor == 0
 
 
-def test_history_is_requested_once_and_applied():
+def test_history_is_read_when_the_tab_opens():
     screen = FakeScreen(28, 96)
     backend = StubBackend(status=STATUS, settings=SETTINGS, history=HISTORY)
     app = App(screen, backend, worker=SyncWorker(backend))
@@ -921,6 +922,59 @@ def test_history_is_requested_once_and_applied():
                                                           "sample", "event"]
     app.draw()
     assert "Mains power lost" in screen.text()
+
+
+def test_history_refreshes_when_the_log_grows():
+    """The History tab follows the recorder rather than loading once."""
+    screen, app, backend = _app()
+    calls = []
+    original = backend.history
+    backend.history = lambda limit=400: (calls.append(1), original(limit))[1]
+
+    clock = {"mtime": 100}
+    saved = app_module._history_mtime
+    app_module._history_mtime = lambda: clock["mtime"]
+    try:
+        app.select_tab(3)
+        app._drain()
+        assert len(calls) == 1, calls
+
+        app._history_checked = 0.0                     # let the check interval pass
+        app._maybe_poll()                              # nothing was appended...
+        app._drain()
+        assert len(calls) == 1, "an unchanged log must not be re-read"
+
+        clock["mtime"] = 101                           # the recorder appended
+        app._history_checked = 0.0
+        app._maybe_poll()
+        app._drain()
+        assert len(calls) == 2, "a grown log must be re-read"
+    finally:
+        app_module._history_mtime = saved
+
+
+def test_history_is_left_alone_while_another_tab_is_showing():
+    screen, app, backend = _app()
+    calls = []
+    backend.history = lambda limit=400: calls.append(1) or list(HISTORY)
+
+    app.tab_index = 0
+    app._history_checked = 0.0
+    app._maybe_poll()
+    app._drain()
+    assert calls == [], "a hidden tab must not cost a process"
+
+
+def test_reopening_the_history_tab_reloads_it():
+    screen, app, backend = _app()
+    calls = []
+    original = backend.history
+    backend.history = lambda limit=400: (calls.append(1), original(limit))[1]
+
+    app.history = copy.deepcopy(HISTORY)               # read once already
+    app.select_tab(3)
+    app._drain()
+    assert len(calls) == 1, "on_show must refresh, not skip a loaded tab"
 
 
 def test_history_failure_is_shown_not_hidden():
