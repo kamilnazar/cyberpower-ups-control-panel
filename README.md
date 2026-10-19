@@ -230,6 +230,7 @@ directory:
 ./cyberpower-ups set capacityLimit 20   # write one setting
 ./cyberpower-ups set delayShutdown off  # write the delays' "off" sentinel
 ./cyberpower-ups watch                  # record a sample every 60 s (Ctrl-C to stop)
+./cyberpower-ups watch --listen         # ...and react to what the UPS pushes itself
 ./cyberpower-ups watch --once           # one sample, for a systemd timer
 ./cyberpower-ups history                # the last 40 recorded lines
 ./cyberpower-ups history --events       # only the events
@@ -285,8 +286,9 @@ journalctl --user -u cyberpower-ups-watch -f      # events as they happen
 If you installed the plugin somewhere other than
 `~/.config/omarchy/plugins/io.github.kamil.cyberpower-ups/`, edit the unit's
 `ExecStart=` to point at your copy — it is the one place in the project that
-names its own location. Use `--source pwrstat` or a NUT name there instead of
-`hidraw` if that is how this machine talks to the UPS.
+names its own location. If this machine talks to the UPS through pwrstat or NUT
+rather than hidraw, add `--source pwrstat` or `--ups NAME`; `--listen` will then
+step aside and poll instead, since only the HID endpoint has reports to read.
 
 If you would rather not keep a process around, use a timer instead: the same
 command with `watch --once` (it compares against the last recorded sample, so
@@ -295,13 +297,38 @@ events are still detected between runs).
 The file is append-only and capped: past 2 MB the oldest half is dropped, never
 the newest, so the recording keeps going without growing without bound.
 
-One honest limitation: this is a sampler, not an interrupt. An outage that
-begins *and* ends between two ticks is invisible to it, so the 60 s default will
-miss a blip shorter than a minute. Lower `--interval` on the unit if that
-matters to you — 15 s narrows the blind spot to 15 s, at the cost of four times
-as many lines. Nothing can close the gap entirely: the UPS reports
-`LastPowerEvent` on some models, but this UT2200EG returns `null` for it, so
-there is nothing to back-fill from.
+### Why `--listen` exists
+
+A plain `watch` is a sampler, and a sampler has a blind spot: an outage that
+begins *and* ends between two ticks leaves no trace at all, and the UPS keeps no
+log to back-fill from (this one returns `null` for `LastPowerEvent`). At the 60 s
+default that blind spot is a minute wide.
+
+`--listen` closes most of it, because the UPS is chattier than you would expect.
+The UT2200EG volunteers input reports on its USB interrupt endpoint unprompted,
+forever — its report descriptor declares the same usages twice, once as *feature*
+reports (which a poll asks for) and once as *input* reports (which the device
+sends on its own). Those pushes carry exactly the flags the events are built
+from: mains present, charging, discharging, below-capacity-limit, boost,
+overload. Measured on this unit, that group arrives every 11.2 s on average and
+12.1 s at worst.
+
+So `--listen` reads the endpoint and takes a full reading only when one of those
+flags actually moves. A status change is therefore recorded in about ten seconds
+instead of up to a minute, and it costs nothing — the listening side makes no USB
+request at all; the device was going to send those reports regardless.
+
+`--interval` keeps its meaning for everything else: it is still how often a full
+reading is taken, which is what keeps the sample series regular and what catches
+the values the device *never* pushes (a battery that needs replacing, the input
+frequency, the voltage band). So there is no reason to lower it.
+
+What is left of the blind spot is the device's own cadence: a dip shorter than
+the push interval is invisible to any tool, PowerPanel included, because the
+information never leaves the UPS. Nothing on the host side can beat that.
+`--listen` needs the hidraw backend; with `pwrstat` or NUT it steps aside and
+polls, since those have no endpoint to read. A model that declares no pushed
+status flags does the same.
 
 ## When something goes wrong
 
@@ -432,6 +459,14 @@ what was on disk.
 The debug trace and the crash log were both exercised on the real device (a
 panel run with `--debug`, and a forced panel exception), confirming that a crash
 launched from the bar leaves a traceback behind even though its terminal closes.
+
+`--listen` was measured rather than assumed. Sitting on the interrupt endpoint
+alone for 60 s, asking for nothing, produced 107 unsolicited reports across 13
+report ids: the status group every 11.2 s on average (12.1 s at worst) and a
+settings-only group every 5.3 s. The pushed copies decode to the same flags a
+feature read returns — that is what `test_pushed_flags_agree_with_the_feature_reports`
+pins down; only the numbers differ, and only because the pushed ones were
+captured a few seconds earlier.
 
 ## Scope
 

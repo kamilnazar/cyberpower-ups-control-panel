@@ -8,9 +8,13 @@ After=graphical-session.target
 [Service]
 Type=simple
 Environment=PYTHONUNBUFFERED=1
-ExecStart=%h/.config/omarchy/plugins/io.github.kamil.cyberpower-ups/bin/cyberpower-ups watch --source hidraw --interval 60
-# A sample is one HID read; 60 s is fine for a voltage history. The reader
-# tolerates a missing device by itself and records one line when it goes away.
+ExecStart=%h/.config/omarchy/plugins/io.github.kamil.cyberpower-ups/bin/cyberpower-ups watch --listen --interval 60
+# --listen reads the reports the UPS pushes by itself, so a status change is
+# recorded in about ten seconds instead of at the next reading. --interval is
+# still how often a full reading is taken, which keeps the sample series
+# regular and catches the values the device never pushes (a battery that needs
+# replacing, the input frequency). The reader tolerates a missing device by
+# itself and records one line when it goes away.
 Restart=on-failure
 RestartSec=30
 

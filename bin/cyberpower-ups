@@ -36,6 +36,7 @@ import glob
 import json
 import os
 import re
+import select
 import struct
 import subprocess
 import sys
@@ -572,9 +573,10 @@ class UpsDevice:
                        f"{(time.monotonic() - started) * 1000:.0f} ms {body.hex()}")
         return cache
 
-    def value_of(self, cache, *usages, path=None, plausible=None) -> float | None:
+    def value_of(self, cache, *usages, path=None, plausible=None,
+                 report_type=REPORT_FEATURE) -> float | None:
         for field in self.fields:
-            if field.report_type != REPORT_FEATURE or field.usage not in usages:
+            if field.report_type != report_type or field.usage not in usages:
                 continue
             if path is not None and not any(node == path for node in field.path):
                 continue
@@ -588,10 +590,10 @@ class UpsDevice:
             return _pick([scaled, base, base / 10.0, base * 10.0], plausible)
         return None
 
-    def flags_of(self, cache, *usages) -> dict[int, int]:
+    def flags_of(self, cache, *usages, report_type=REPORT_FEATURE) -> dict[int, int]:
         out: dict[int, int] = {}
         for field in self.fields:
-            if field.report_type != REPORT_FEATURE or field.usage not in usages:
+            if field.report_type != report_type or field.usage not in usages:
                 continue
             body = cache.get(field.report_id, b"")
             if not body:
@@ -652,6 +654,28 @@ POLL_USAGES = frozenset({
     U_FULLY_CHARGED, U_NEED_REPLACEMENT, U_OVERLOAD, U_BOOST, U_POWER_FAIL,
     U_REMAINING_TIME_LIMIT_EXPIRED,
 })
+
+# The UT2200EG does not sit still waiting to be asked: it volunteers input
+# reports on its USB interrupt endpoint, unprompted, forever. The descriptor
+# says why — these usages are declared twice, once as FEATURE (which a poll
+# asks for) and once as INPUT (which the device sends by itself). Measured on
+# the UT2200EG, the status group (0x20 capacity + voltage, 0x21 run time,
+# 0x22 the mains flags, 0x23 voltage, 0x25 load, 0x28 boost and overload)
+# arrives every 11.2 s on average and 12.1 s at worst, while a settings-only
+# group (0x80, 0x85, 0x86, 0x87, 0x88 — alarm, test, the two delays, the
+# nominal voltage) arrives every 5.3 s. So a listener sees a status change
+# about a minute sooner than a 60 s poll, at no cost: it asks for nothing.
+
+#: The flags worth waking a full reading for. The numbers the pushes carry
+#: (voltage, load, run time) drift constantly and would make the listener as
+#: chatty as polling; events_between() still sees them, at the full-read pace.
+LISTEN_FLAGS = (U_AC_PRESENT, U_DISCHARGING, U_CHARGING, U_FULLY_CHARGED,
+                U_BELOW_CAPACITY_LIMIT, U_REMAINING_TIME_LIMIT_EXPIRED,
+                U_OVERLOAD, U_BOOST)
+
+LISTEN_QUIET = 1.5      # s of silence that ends a pushed burst
+LISTEN_TICK = 0.5       # s between passes of the listening loop
+LISTEN_RETRY = 30.0     # s to wait before reopening the device after a failure
 
 
 def read_hidraw(device: "UpsDevice | None" = None) -> dict:
@@ -1421,63 +1445,213 @@ def events_between(previous: dict | None, current: dict, band: float = VOLTAGE_B
     return events
 
 
-def watch(interval: float, source: str, ups_name: str | None, once: bool,
-          band: float = VOLTAGE_BAND) -> int:
-    """Sample the UPS, appending samples and events to the history.
+class Recorder:
+    """Turns readings into history lines, remembering the previous one.
 
-    Meant to be left running (or called by a timer): a read that fails records
-    one line and then keeps trying, rather than ending the log with a traceback.
+    `previous` starts from the last sample already on disk, so restarting the
+    recorder does not lose the edge that happened while it was down.
     """
-    previous = next((record for record in reversed(read_history())
-                     if record.get("kind") == "sample"), None)
-    if previous is None:
-        DIAG.debug("watch: no earlier sample, events start from the second tick")
-    unreadable = False
 
-    def trouble(name: str, message: str) -> None:
-        nonlocal unreadable
-        if not unreadable:              # one line per outage, not one per tick
-            append_history([_event(name, message, "bad", int(time.time()))])
-            print(message, file=sys.stderr)
-            unreadable = True
+    def __init__(self, band: float = VOLTAGE_BAND):
+        self.band = band
+        self.previous = next((record for record in reversed(read_history())
+                              if record.get("kind") == "sample"), None)
+        if self.previous is None:
+            DIAG.debug("recorder: no earlier sample, events start from the second reading")
+        self.unreadable = False
 
-    while True:
-        try:
-            data = collect(source, ups_name)
-        except NoDevice as error:
-            trouble("deviceLost", f"UPS not readable: {error}")
-            if once:
-                return 2
-            time.sleep(interval)
-            continue
-        except Exception as error:      # noqa: BLE001 - a bad read must not end the log
-            DIAG.debug(f"watch: {type(error).__name__}: {error}")
-            trouble("readerError", f"Reading the UPS failed: {error}")
-            if once:
-                return 2
-            time.sleep(interval)
-            continue
+    def trouble(self, name: str, message: str) -> None:
+        """Record a failure once per outage, not once per attempt."""
+        if self.unreadable:
+            return
+        append_history([_event(name, message, "bad", int(time.time()))])
+        print(message, file=sys.stderr)
+        self.unreadable = True
 
-        if unreadable:
+    def record(self, data: dict) -> list[dict]:
+        if self.unreadable:
             append_history([_event("deviceBack", "UPS readable again", "info",
                                    int(time.time()))])
-            unreadable = False
-
-        records = events_between(previous, data, band)
+            self.unreadable = False
+        records = events_between(self.previous, data, self.band)
         append_history([sample_record(data)] + records)
         for record in records:
             print(f"{time.strftime('%H:%M:%S', time.localtime(record['t']))}  "
                   f"{record['text']}", flush=True)
         DIAG.debug(f"watch: input {data.get('inputVoltage')} V, "
                    f"load {data.get('loadPercent')} %, battery {data.get('battery')} %")
-        previous = data
+        self.previous = data
+        return records
 
-        if once:
-            return 0
+
+def _sample_once(rec: Recorder, source: str, ups_name: str | None) -> int:
+    """One reading, for a systemd timer. 2 means the UPS could not be read."""
+    try:
+        data = collect(source, ups_name)
+    except NoDevice as error:
+        rec.trouble("deviceLost", f"UPS not readable: {error}")
+        return 2
+    except Exception as error:      # noqa: BLE001 - a bad read must not end the log
+        DIAG.debug(f"watch: {type(error).__name__}: {error}")
+        rec.trouble("readerError", f"Reading the UPS failed: {error}")
+        return 2
+    rec.record(data)
+    return 0
+
+
+def poll_loop(rec: Recorder, interval: float, source: str,
+              ups_name: str | None) -> int:
+    """A reading every `interval` seconds, forever."""
+    while True:
+        try:
+            data = collect(source, ups_name)
+        except NoDevice as error:
+            rec.trouble("deviceLost", f"UPS not readable: {error}")
+        except Exception as error:  # noqa: BLE001 - a bad read must not end the log
+            DIAG.debug(f"watch: {type(error).__name__}: {error}")
+            rec.trouble("readerError", f"Reading the UPS failed: {error}")
+        else:
+            rec.record(data)
         try:
             time.sleep(interval)
         except KeyboardInterrupt:
             return 0
+
+
+def listen_reports(device: "UpsDevice") -> tuple[int, ...]:
+    """The pushed report ids that carry a status flag, per the descriptor.
+
+    On the UT2200EG that is (0x22, 0x28): the mains flags, and boost with
+    overload. A burst missing one of them is only half-read, and would look
+    like those flags clearing, so a burst is trusted only once all of them
+    have arrived. A model that declares no pushed status flags at all cannot
+    be listened to, and falls back to polling.
+    """
+    return tuple(sorted({field.report_id for field in device.fields
+                         if field.report_type == REPORT_INPUT
+                         and field.usage in LISTEN_FLAGS}))
+
+
+def pushed_flags(device: "UpsDevice", cache: dict[int, bytes],
+                 needed: tuple[int, ...]) -> tuple | None:
+    """The status flags in one pushed burst, or None for a partial burst."""
+    if not all(report_id in cache for report_id in needed):
+        return None
+    flags = device.flags_of(cache, *LISTEN_FLAGS, report_type=REPORT_INPUT)
+    return tuple(int(flags.get(usage, 0)) for usage in LISTEN_FLAGS)
+
+
+def _listen_loop(rec: Recorder, interval: float, device: "UpsDevice") -> None:
+    """Read the device's own reports until something goes wrong.
+
+    Returns only by raising: NoDevice when the UPS stops answering, anything
+    else when a full reading fails. The caller reopens the device.
+    """
+    needed = listen_reports(device)
+    fd = os.open(device.path, os.O_RDONLY | os.O_NONBLOCK)
+    cache: dict[int, bytes] = {}
+    seen: tuple | None = None
+    last_seen = 0.0
+    next_full = time.monotonic()
+    try:
+        while True:
+            ready, _, _ = select.select([fd], [], [], LISTEN_TICK)
+            now = time.monotonic()
+            if ready:
+                try:
+                    body = os.read(fd, 64)
+                except BlockingIOError:
+                    continue
+                if not body:            # unplugged: hidraw hands us EOF
+                    raise NoDevice("the UPS stopped answering on its endpoint")
+                cache[body[0]] = body[1:]
+                last_seen = now
+                continue
+
+            if cache and now - last_seen >= LISTEN_QUIET:
+                flags = pushed_flags(device, cache, needed)
+                cache = {}
+                if flags is not None:
+                    if seen is None:
+                        DIAG.debug("listen: first pushed burst read")
+                    elif flags != seen:
+                        DIAG.debug(f"listen: pushed flags {seen} -> {flags}")
+                        rec.record(read_hidraw(device))
+                        next_full = now + interval
+                    seen = flags
+
+            if now >= next_full:
+                rec.record(read_hidraw(device))
+                next_full = now + interval
+    finally:
+        os.close(fd)
+
+
+def listen_for_pushes(rec: Recorder, interval: float, source: str,
+                      ups_name: str | None) -> int:
+    """React to the UPS' own pushes instead of asking on a timer.
+
+    The device already tells us when the flags move, so the recorder reads the
+    interrupt endpoint and only asks for a full reading — which is what turns
+    into a sample and into events — when they actually change. `interval` still
+    applies as a reading of its own, which is what catches the values the
+    device never pushes (a battery that needs replacing, the input frequency)
+    and keeps the sample series regular.
+    """
+    device = UpsDevice.find()
+    if device is None:
+        if source == "auto":            # pwrstat or NUT may still answer
+            DIAG.debug("listen: no hidraw UPS to listen to; polling instead")
+            return poll_loop(rec, interval, source, ups_name)
+        rec.trouble("deviceLost",
+                    "UPS not readable: no CyberPower UPS on a readable hidraw node")
+    elif not device.uses_report_ids:
+        # Without report ids the pushes cannot be told apart, so there is
+        # nothing to listen to. No CyberPower seen so far is in this shape.
+        DIAG.debug("listen: the descriptor uses no report ids; polling instead")
+        return poll_loop(rec, interval, source, ups_name)
+    elif not listen_reports(device):
+        DIAG.debug("listen: the device declares no pushed status flags; polling instead")
+        return poll_loop(rec, interval, source, ups_name)
+    while True:
+        if device is None:
+            try:
+                time.sleep(min(interval, LISTEN_RETRY))
+            except KeyboardInterrupt:
+                return 0
+            device = UpsDevice.find()
+            if device is None:
+                continue
+        try:
+            _listen_loop(rec, interval, device)
+        except KeyboardInterrupt:
+            return 0
+        except NoDevice as error:
+            rec.trouble("deviceLost", f"UPS not readable: {error}")
+        except Exception as error:      # noqa: BLE001 - a bad read must not end the log
+            DIAG.debug(f"listen: {type(error).__name__}: {error}")
+            rec.trouble("readerError", f"Reading the UPS failed: {error}")
+        # A failure means starting over: the node may have been renumbered.
+        device = None
+
+
+def watch(interval: float, source: str, ups_name: str | None, once: bool,
+          band: float = VOLTAGE_BAND, listen: bool = False) -> int:
+    """Sample the UPS, appending samples and events to the history.
+
+    Meant to be left running (or called by a timer): a read that fails records
+    one line and then keeps trying, rather than ending the log with a traceback.
+    With `listen`, the UPS' own pushed reports are what wakes a full reading,
+    so a flag that moves is caught in about ten seconds instead of at `interval`.
+    """
+    rec = Recorder(band)
+    if once:
+        return _sample_once(rec, source, ups_name)
+    if listen:
+        if source in ("auto", "hidraw"):
+            return listen_for_pushes(rec, interval, source, ups_name)
+        DIAG.debug(f"listen: the {source} backend has no interrupt endpoint; polling")
+    return poll_loop(rec, interval, source, ups_name)
 
 
 def select_history(records: list[dict], limit: int | None, since_minutes: float | None,
@@ -1525,6 +1699,9 @@ def main(argv=None) -> int:
                         help="watch: take a single sample and exit, for a systemd timer")
     parser.add_argument("--band", type=float, default=VOLTAGE_BAND,
                         help="watch: input voltage band, as a percent of nominal")
+    parser.add_argument("--listen", action="store_true",
+                        help="watch: react to the reports the UPS pushes by "
+                             "itself (hidraw only) instead of only polling")
     parser.add_argument("--limit", type=int, default=40,
                         help="history: how many records to show (0 for all)")
     parser.add_argument("--since", type=float, default=None,
@@ -1544,7 +1721,8 @@ def main(argv=None) -> int:
 
     try:
         if args.action == "watch":
-            return watch(args.interval, args.source, args.ups, args.once, args.band)
+            return watch(args.interval, args.source, args.ups, args.once,
+                         args.band, args.listen)
 
         if args.action == "history":
             records = select_history(read_history(), args.limit, args.since, args.events)

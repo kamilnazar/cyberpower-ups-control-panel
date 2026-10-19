@@ -61,6 +61,7 @@ REPORT_COUNT = 0x94
 COLLECTION = 0xA0
 END_COLLECTION = 0xC0
 FEATURE = 0xB0
+INPUT = 0x80
 
 
 def u32(prefix, value):
@@ -84,6 +85,19 @@ def build_descriptor():
     d += u8(LOG_MIN, 0) + u8(LOG_MAX, 1) + u8(REPORT_SIZE, 1) + u8(REPORT_COUNT, 6)
     d += u8(FEATURE, 0x02)
     d += u8(REPORT_COUNT, 2) + u8(FEATURE, 0x03)                    # padding
+    # Report 8 is declared a second time as input reports. The UT2200EG does
+    # just this: it pushes the values it would otherwise have to be asked for,
+    # so a listener can have them without making a request. Same layout, only
+    # the main item differs.
+    d += u8(USAGE, 0x66) + u8(LOG_MIN, 0) + u8(LOG_MAX, 100)
+    d += u8(REPORT_SIZE, 8) + u8(REPORT_COUNT, 1) + u8(INPUT, 0x02)
+    d += u8(USAGE, 0x68) + u16(LOG_MAX, 32767)
+    d += u8(REPORT_SIZE, 16) + u8(REPORT_COUNT, 1) + u8(INPUT, 0x02)
+    d += u8(USAGE, 0xD0) + u8(USAGE, 0x44) + u8(USAGE, 0x45) + u8(USAGE, 0x46)
+    d += u8(USAGE, 0x42) + u8(USAGE, 0x4B)
+    d += u8(LOG_MIN, 0) + u8(LOG_MAX, 1) + u8(REPORT_SIZE, 1) + u8(REPORT_COUNT, 6)
+    d += u8(INPUT, 0x02)
+    d += u8(REPORT_COUNT, 2) + u8(INPUT, 0x03)                      # padding
     d += bytes([END_COLLECTION])
     # Input voltage / frequency: report 0x10
     d += u16(PAGE, 0x84)
@@ -385,6 +399,127 @@ def test_physical_mapping():
     assert ups.to_physical(field, 10) == 600.0              # logical minutes -> seconds
     assert ups._physical_to_logical(field, 600) == 10
     assert ups._physical_to_logical(field, 0) == 0
+
+
+# --------------------------------------------------------------------------
+# listening: reacting to the reports the UPS pushes by itself
+# --------------------------------------------------------------------------
+
+#: the status byte, as the device would push it: 100% charge, 3600 s runtime
+def pushed_body(flags_byte):
+    return bytes.fromhex("64") + (3600).to_bytes(2, "little") + bytes([flags_byte])
+
+
+#: the same, framed the way it arrives on the interrupt endpoint: id byte first
+def pushed_record(flags_byte):
+    return bytes([8]) + pushed_body(flags_byte)
+
+
+def test_listen_reports_comes_from_the_descriptor():
+    """Which reports to wait for is read off the device, not hardcoded."""
+    assert ups.listen_reports(fake_device({})) == (8,)
+
+
+def test_pushed_flags_need_a_complete_burst():
+    """A burst without the flag reports says nothing, rather than "all clear"."""
+    device = fake_device({})
+    needed = ups.listen_reports(device)
+    assert ups.pushed_flags(device, {}, needed) is None
+    assert ups.pushed_flags(device, {0x20: b"\x00\x00"}, needed) is None
+
+    flags = ups.pushed_flags(device, {8: pushed_body(0x09)}, needed)
+    assert flags is not None
+    seen = dict(zip(ups.LISTEN_FLAGS, flags))
+    assert seen[ups.U_AC_PRESENT] == 1 and seen[ups.U_FULLY_CHARGED] == 1, seen
+    assert seen[ups.U_DISCHARGING] == 0 and seen[ups.U_BOOST] == 0, seen
+
+
+def test_pushed_flags_agree_with_the_feature_reports():
+    """The pushed copy decodes to what a poll would have read."""
+    body = pushed_body(0x0D)                        # AC present + discharging
+    device = fake_device({8: body})
+    pushed = ups.pushed_flags(device, {8: body}, ups.listen_reports(device))
+    feature = device.flags_of({8: body}, *ups.LISTEN_FLAGS)
+    assert pushed == tuple(int(feature.get(usage, 0)) for usage in ups.LISTEN_FLAGS)
+    assert dict(zip(ups.LISTEN_FLAGS, pushed))[ups.U_DISCHARGING] == 1
+
+
+def test_listen_records_only_when_a_pushed_flag_moves():
+    """The loop wakes a full reading on a change, and stays quiet otherwise.
+
+    The device is a FIFO here, so bursts can be fed in by hand; the readings a
+    full read would produce are stubbed, and follow whatever the burst said.
+    """
+    import threading
+
+    original = {"read_hidraw": ups.read_hidraw, "LISTEN_QUIET": ups.LISTEN_QUIET,
+                "LISTEN_TICK": ups.LISTEN_TICK}
+    with temp_state(), tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "pushed")
+        os.mkfifo(path)
+        device = fake_device({})
+        device.path = path
+
+        state = {"discharging": False}
+        readings = []
+
+        def fake_read_hidraw(device=None):
+            readings.append(state["discharging"])
+            return reading(online=not state["discharging"],
+                           onBattery=state["discharging"],
+                           status="onBattery" if state["discharging"] else "fullyCharged")
+
+        failures = []
+
+        def run():
+            try:
+                ups._listen_loop(ups.Recorder(), 60.0, device)
+            except BaseException as error:      # the loop only ever leaves by raising
+                failures.append(error)
+
+        ups.read_hidraw = fake_read_hidraw
+        ups.LISTEN_QUIET = 0.2                  # keep the test quick
+        ups.LISTEN_TICK = 0.05
+        try:
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
+            time.sleep(0.3)                     # the reader opens, then the first reading
+            writer = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+            os.write(writer, pushed_record(0x09))           # mains up, fully charged
+            time.sleep(0.5)
+            state["discharging"] = True
+            os.write(writer, pushed_record(0x0D))           # ...now on battery
+            time.sleep(0.5)
+            os.write(writer, pushed_record(0x0D))           # a repeat changes nothing
+            time.sleep(0.5)
+            os.close(writer)                                # unplugged
+            thread.join(timeout=5)
+        finally:
+            ups.read_hidraw = original["read_hidraw"]
+            ups.LISTEN_QUIET = original["LISTEN_QUIET"]
+            ups.LISTEN_TICK = original["LISTEN_TICK"]
+
+        assert not thread.is_alive(), "the loop should stop at end of file"
+        assert len(failures) == 1 and isinstance(failures[0], ups.NoDevice), failures
+
+        # one reading at the start, one when the flag moved, and no more
+        assert readings == [False, True], readings
+        records = ups.read_history()
+        assert [record["kind"] for record in records].count("sample") == 2, records
+        assert [record["event"] for record in records if record["kind"] == "event"] \
+            == ["mainsLost", "onBattery"], records
+
+
+def test_listen_falls_back_to_polling_without_an_endpoint():
+    """pwrstat and NUT have no interrupt endpoint, so listening is not offered."""
+    calls = []
+    original_poll = ups.poll_loop
+    try:
+        ups.poll_loop = lambda rec, interval, source, ups_name: calls.append(source) or 0
+        assert ups.watch(60.0, "pwrstat", None, False, listen=True) == 0
+        assert calls == ["pwrstat"], calls
+    finally:
+        ups.poll_loop = original_poll
 
 
 # --------------------------------------------------------------------------
