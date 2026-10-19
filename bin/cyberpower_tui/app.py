@@ -77,6 +77,9 @@ class Tab:
     def on_show(self) -> None:
         return
 
+    def on_hide(self) -> None:
+        return
+
     def move(self, delta: int) -> None:
         total = self.count()
         if total > 0:
@@ -218,7 +221,23 @@ class ControlsTab(Tab):
 
 
 class SettingsTab(Tab):
+    """The settings table, edited in two steps: stage, then Enter.
+
+    Nothing is written while the arrows move: they either walk the table or
+    (once a row is being edited) preview a new value. Only ``Enter`` commits,
+    which is both what the eye expects and what keeps a burst of arrow presses
+    from becoming a burst of USB writes. Because the arrows are free while
+    browsing, ``←``/``→`` keep switching tabs here as they do everywhere else.
+    """
+
     title = "Settings"
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.editing = False
+        #: A detached copy of the selected setting, holding the value the user
+        #: is previewing. The real setting is untouched until commit().
+        self.staged: dict | None = None
 
     def count(self) -> int:
         return len(self.app.settings)
@@ -230,12 +249,18 @@ class SettingsTab(Tab):
         return None
 
     def hints(self) -> str:
-        return ("↑/↓ select   ←/→ change   Enter edit/cycle   o off   "
+        if self.editing:
+            return ("←/→ or +/- change   Enter apply   Esc cancel   o off   "
+                    "↑/↓ pick another row")
+        return ("↑/↓ select   Enter edit   e type value   o off   "
                 "r reload   ←/→ tabs")
 
     def on_show(self) -> None:
         if not self.app.settings and self.app.settings_error:
             self.app.request_settings()
+
+    def on_hide(self) -> None:
+        self.cancel_edit()
 
     def draw(self, top, height, width):
         app, screen, theme = self.app, self.app.screen, self.app.theme
@@ -263,12 +288,22 @@ class SettingsTab(Tab):
             row = top + 2 + (index - first)
             selected = index == self.cursor
             writable = setting.get("writable", True)
+            editing = selected and self.staged is not None
+            shown = self.staged if editing else setting
             label = W.pad(setting["label"], SETTINGS_LABEL_W)
-            value = W.pad(F.setting_value_text(setting), SETTINGS_VALUE_W)
-            allowed = F.setting_allowed_text(setting)
+            value = W.pad(F.setting_value_text(shown), SETTINGS_VALUE_W)
+            if editing:
+                allowed = "Enter applies" if self._changed() else "←/→ change"
+            else:
+                allowed = F.setting_allowed_text(setting)
             if selected:
                 line = _setting_row(label, value, allowed, width - 1)
                 W.put(screen, row, 0, line, theme.selection if writable else curses.A_DIM)
+                if editing:
+                    # Overdraw just the value cell so the preview stands out
+                    # from the selected row behind it.
+                    W.put(screen, row, SETTINGS_VALUE_X, value,
+                          theme.accent | curses.A_UNDERLINE)
             else:
                 W.put(screen, row, SETTINGS_LABEL_X, label,
                       theme.muted if writable else curses.A_DIM)
@@ -277,79 +312,145 @@ class SettingsTab(Tab):
                 W.put(screen, row, SETTINGS_ALLOWED_X, allowed, theme.muted)
             self.hits.append((row, index))
 
-    # -- actions ---------------------------------------------------------
+    # -- editing ---------------------------------------------------------
     def _guard(self, setting: dict) -> bool:
         if not setting.get("writable", True):
             self.app.notify(f"{setting['label']} is read-only on this UPS", "warn")
             return False
         return True
 
-    def activate_current(self) -> None:
+    def _changed(self) -> bool:
+        """True when the staged copy differs from the setting on the UPS."""
         setting = self.current()
-        if setting is None or not self._guard(setting):
-            return
-        if F.is_enum(setting):
-            value = F.cycle_enum(setting, 1)
-            if value is not None:
-                self.app.apply_setting(setting, value)
-        else:
-            self.app.dialog = EditDialog(setting)
+        if setting is None or self.staged is None:
+            return False
+        return not F.same_value(self.staged.get("value"), setting.get("value"))
 
-    def adjust(self, direction: int) -> None:
-        setting = self.current()
-        if setting is None or not self._guard(setting):
+    def _ensure_staged(self) -> dict | None:
+        """Start editing the selected row, if it is writable. Never writes."""
+        if self.staged is None:
+            setting = self.current()
+            if setting is None or not self._guard(setting):
+                return None
+            self.staged = dict(setting)
+            self.editing = True
+        return self.staged
+
+    def stage(self, direction: int = 0) -> None:
+        """Preview the next/previous value of the selected setting."""
+        staged = self._ensure_staged()
+        if staged is None or direction == 0:
             return
-        if F.is_enum(setting):
-            value = F.cycle_enum(setting, direction)
+        if F.is_enum(staged):
+            value = F.cycle_enum(staged, direction)
         else:
-            value = F.step_numeric(setting, direction)
+            value = F.step_numeric(staged, direction)
         if value is not None:
-            self.app.apply_setting(setting, F.num(value, 1))
+            F.set_local_value(staged, F.num(value, 1))
 
-    def turn_off(self) -> None:
+    def stage_off(self) -> None:
         setting = self.current()
-        if setting is None:
+        if setting is None or not self._guard(setting):
             return
         if not F.has_off(setting):
             self.app.notify(f"{setting['label']} cannot be turned off", "warn")
             return
-        if self._guard(setting):
-            self.app.apply_setting(setting, "off")
+        staged = self._ensure_staged()
+        if staged is not None:
+            staged["value"] = None
+            staged["valueLabel"] = "off"
+
+    def cancel_edit(self) -> None:
+        self.editing = False
+        self.staged = None
+
+    def commit(self) -> None:
+        """Write the staged value. The only place a setting is written."""
+        setting, staged = self.current(), self.staged
+        if setting is None or staged is None:
+            self.cancel_edit()
+            return
+        value = staged.get("value")
+        changed = self._changed()
+        self.cancel_edit()
+        if not changed:
+            self.app.notify("no change")
+            return
+        self.app.apply_setting(setting, "off" if value is None else F.num(value, 1))
+
+    def activate_current(self) -> None:
+        if self.editing:
+            self.commit()
+        else:
+            self.stage()
+
+    def _move(self, delta: int) -> None:
+        """Move the cursor, abandoning (and saying so about) a staged edit."""
+        changed = self.editing and self._changed()
+        before = self.cursor
+        self.move(delta)
+        if self.cursor == before:
+            return
+        if self.editing:
+            self.cancel_edit()
+            if changed:
+                self.app.notify("change discarded", "warn")
+
+    def click(self, row: int) -> bool:
+        before = self.cursor
+        if not super().click(row):
+            return False
+        if self.cursor != before:
+            self.cancel_edit()
+        return True
 
     def handle(self, key) -> bool:
         if self.count() == 0:
             return False
+        if key in ("\x1b", 27):
+            if self.editing:
+                self.cancel_edit()
+                self.app.notify("change discarded")
+                return True
+            return False
         if self.is_down(key):
-            self.move(1)
+            self._move(1)
             return True
         if self.is_up(key):
-            self.move(-1)
+            self._move(-1)
             return True
         if key == curses.KEY_NPAGE:
-            self.move(5)
+            self._move(5)
             return True
         if key == curses.KEY_PPAGE:
-            self.move(-5)
+            self._move(-5)
             return True
-        if key in ENTER_KEYS:
-            self.activate_current()
-            return True
-        if key == " ":
+        if key in ENTER_KEYS or key == " ":
             self.activate_current()
             return True
         if key == curses.KEY_LEFT or key in ("-", "_"):
-            self.adjust(-1)
-            return True
+            # The arrows only touch the value while a row is being edited;
+            # while browsing they fall through to the tab strip.
+            if self.editing:
+                self.stage(-1)
+                return True
+            return False
         if key == curses.KEY_RIGHT or key in ("+", "="):
-            self.adjust(1)
-            return True
+            if self.editing:
+                self.stage(1)
+                return True
+            return False
         if key in ("e", "E"):
             setting = self.current()
-            if setting is not None and not F.is_enum(setting) and self._guard(setting):
+            if setting is None or not self._guard(setting):
+                return True
+            if F.is_enum(setting):
+                self.app.notify("use ←/→ to pick a value, then Enter to apply")
+            else:
                 self.app.dialog = EditDialog(setting)
             return True
         if key in ("o", "O"):
-            self.turn_off()
+            self.stage_off()
             return True
         return False
 
@@ -483,9 +584,11 @@ class AboutTab(Tab):
         for line in (
             "↑/↓ or j/k     move in the list",
             "←/→ or Tab     switch tab (1-5 jump straight there)",
-            "Enter          run an action, or cycle / edit a setting",
-            "+ / -          step a numeric setting up or down",
-            "o              turn a setting off, where the UPS allows it",
+            "Enter          run an action, or start / apply a setting edit",
+            "←/→ or +/-     while editing a setting: pick the new value",
+            "Esc            while editing a setting: discard the change",
+            "e              type an exact number (instead of stepping)",
+            "o              stage 'off', where the UPS allows it; Enter applies",
             "r              refresh now",
             "q              quit",
         ):
@@ -863,6 +966,7 @@ class App:
     def select_tab(self, index: int) -> None:
         if not 0 <= index < len(self.tabs) or index == self.tab_index:
             return
+        self.tab.on_hide()
         self.tab_index = index
         self.tab.on_show()
 

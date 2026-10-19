@@ -142,26 +142,33 @@ line.
 | --- | ------------- |
 | **Status** | a battery gauge, the power path (mains → UPS → load) and every reading |
 | **Controls** | run a quick/deep battery test, abort one, mute the alarm |
-| **Settings** | every tunable setting the UPS publishes, editable in place |
+| **Settings** | every tunable setting the UPS publishes, edited in two steps |
 | **History** | the input voltage as a sparkline, then the events the recorder logged |
 | **About** | where the readings come from, and the key help |
 
 | Key | Action |
 | --- | ------ |
-| `←` `→`, `Tab`, `1`–`5` | switch tab (or change a value, on **Settings**) |
+| `←` `→`, `Tab`, `1`–`5` | switch tab |
 | `↑` `↓`, `j` `k` | move through actions, settings and events |
-| `Enter` | run an action, or cycle / edit a setting |
-| `+` `-` | step a numeric setting |
-| `o` | turn a setting off, where the UPS allows it |
+| `Enter` | run an action, or start / apply a setting edit |
+| `←` `→`, `+` `-` | while editing a setting: pick the new value |
+| `Esc` | while editing a setting: discard the change |
+| `e` | type an exact number instead of stepping |
+| `o` | stage "off", where the UPS allows it; `Enter` applies it |
 | `r` | re-read the status, settings and history |
 | `q` | quit |
 
 The mouse works too: click a tab to switch, click a row to select it, click it
-again to run it.
+again to run it (or to start editing a setting).
 
-On **Settings**, enum settings cycle with `←`/`→` or `Enter`; numeric ones step
-with `←`/`→` and open a small editor on `Enter`. Only the settings your model
-publishes and marks writable appear:
+On **Settings**, editing is two steps. `Enter` starts editing the selected row
+and the arrows (or `+`/`-`) then preview a new value — the preview is shown
+underlined and nothing is written yet. `Enter` applies it, `Esc` (or moving to
+another row) throws it away. Because the arrows are free while you browse, they
+keep switching tabs here as they do on every other tab, so `→` from **Settings**
+lands on **History** rather than being swallowed by the table. Starting an edit
+and applying it is exactly one USB write, however many arrow presses it took to
+get there. Only the settings your model publishes and marks writable appear:
 
 | Setting | HID usage | Typical range |
 | ------- | --------- | ------------- |
@@ -175,16 +182,19 @@ publishes and marks writable appear:
 Settings are read back in physical units (so a descriptor that declares the
 delays as logical minutes against physical seconds still reads in seconds), and
 writes are clamped to the range the descriptor declares. A negative logical
-minimum is the "off" sentinel that the delays use; `o` (or `set <key> off`)
-writes it. Direct USB is required to change anything; the `pwrstat` and NUT
-backends are status-only here.
+minimum is the "off" sentinel that the delays use; `o` stages it and `Enter`
+applies it (`set <key> off` does the same from the CLI, in one step). Direct USB
+is required to change anything; the `pwrstat` and NUT backends are status-only
+here.
 
 ### Why it feels responsive
 
 Every reading and every write is a USB round trip (a status read is around a
 second on the test unit), so the panel never does one in the event loop. A
 worker thread runs them instead and the loop only picks up the results, which
-keeps the cursor and the keys immediate no matter what is in flight.
+keeps the cursor and the keys immediate no matter what is in flight. Staging a
+setting is pure UI — the arrows cost nothing and the single write happens when
+you press `Enter`.
 
 A changed setting is drawn at once and written in the background, so holding
 down `→` steps as fast as you can press it while only the final value is

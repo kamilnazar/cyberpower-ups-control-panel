@@ -272,6 +272,15 @@ def test_clip_and_pad():
     assert len(W.pad("toolong", 4)) == 4
 
 
+def test_same_value_sees_through_int_float_and_none():
+    assert F.same_value(300, 300.0) is True         # 300 and 300.0 are one value
+    assert F.same_value("2", 2) is True             # the reader may quote numbers
+    assert F.same_value(None, None) is True         # "off" twice is no change
+    assert F.same_value(300, 301) is False
+    assert F.same_value(None, 60) is False
+    assert F.same_value("off", None) is False
+
+
 def test_set_local_value():
     numeric = dict(SETTINGS[1])
     assert F.set_local_value(numeric, 450) is True
@@ -611,25 +620,72 @@ def test_settings_tab_renders():
     assert "off · 0 – 1,966,020 s" in text, text
 
 
-def test_settings_enum_cycles_and_numeric_steps():
+def test_settings_enter_starts_an_edit_and_arrows_preview():
     screen, app, backend = _app()
     tab = app.tabs[2]
+    app.tab_index = 2
 
-    tab.cursor = 0                                  # enum: Enter cycles
-    tab.activate_current()
-    assert backend.sets[-1] == ("alarm", 3), backend.sets
+    tab.cursor = 0                                  # enum
+    app.handle("\n")                                # Enter: start editing
+    assert tab.editing and backend.sets == [], backend.sets
+
+    app.handle(curses.KEY_RIGHT)                    # preview, still no write
+    assert backend.sets == [], backend.sets
+    assert F.setting_value_text(tab.staged) == "‹ muted ›", tab.staged
+    assert app.setting("alarm")["valueLabel"] == "enabled"   # untouched
+
+    app.handle("\n")                                # Enter: the one write
+    assert backend.sets == [("alarm", "3")], backend.sets
     assert app.setting("alarm")["valueLabel"] == "muted", app.setting("alarm")
+    assert not tab.editing
 
-    tab.cursor = 1                                  # numeric: arrows step
-    tab.adjust(1)
-    assert backend.sets[-1] == ("runtimeLimit", "301"), backend.sets
-    # 300 -> 301 -> 300. Each press builds on what is on screen, not on the
-    # value the UPS last confirmed, so quick presses add up.
-    tab.adjust(-1)
-    assert backend.sets[-1] == ("runtimeLimit", "300"), backend.sets
+    tab.cursor = 1                                  # numeric
+    tab.stage()                                     # start editing
+    tab.stage(1)
+    tab.stage(1)
+    assert backend.sets == [("alarm", "3")], backend.sets
+    tab.commit()
+    assert backend.sets[-1] == ("runtimeLimit", "302"), backend.sets
 
-    app._drain()                                    # apply the confirmations
-    assert app.setting("runtimeLimit")["value"] == 300, app.setting("runtimeLimit")
+
+def test_settings_escape_discards_a_preview():
+    screen, app, backend = _app()
+    tab = app.tabs[2]
+    app.tab_index = 2
+    tab.cursor = 1
+
+    app.handle("\n")
+    app.handle(curses.KEY_RIGHT)
+    assert app.setting("runtimeLimit")["value"] == 300      # never touched
+    app.handle("\x1b")
+    assert not tab.editing and tab.staged is None
+    assert backend.sets == [], backend.sets
+    assert "discarded" in app.message, app.message
+
+
+def test_settings_moving_away_discards_a_preview():
+    screen, app, backend = _app()
+    tab = app.tabs[2]
+    tab.cursor = 1
+
+    tab.stage()
+    tab.stage(1)
+    tab.handle(curses.KEY_DOWN)                     # move to the next row
+    assert tab.cursor == 2 and not tab.editing
+    assert backend.sets == [], backend.sets
+    assert "discarded" in app.message, app.message
+
+
+def test_settings_enter_on_an_unchanged_row_writes_nothing():
+    screen, app, backend = _app()
+    tab = app.tabs[2]
+    app.tab_index = 2
+    tab.cursor = 1
+
+    app.handle("\n")
+    app.handle("\n")                                # apply without changing
+    assert backend.sets == [], backend.sets
+    assert app.message == "no change", app.message
 
 
 def test_setting_write_is_optimistic():
@@ -638,7 +694,9 @@ def test_setting_write_is_optimistic():
     tab = app.tabs[2]
     tab.cursor = 1                                  # runtimeLimit, 300 s
 
-    tab.adjust(1)
+    tab.stage()
+    tab.stage(1)
+    tab.commit()
     assert app.setting("runtimeLimit")["value"] == 301      # already on screen
     assert backend.sets == [("runtimeLimit", "301")]
 
@@ -657,7 +715,9 @@ def test_setting_write_rolls_back_on_rejection():
     tab.cursor = 1
     before = app.setting("runtimeLimit")["value"]
 
-    tab.adjust(1)
+    tab.stage()
+    tab.stage(1)
+    tab.commit()
     assert app.setting("runtimeLimit")["value"] == before + 1
 
     app._drain()
@@ -671,8 +731,12 @@ def test_stale_write_reply_is_ignored():
     tab = app.tabs[2]
     tab.cursor = 1
 
-    tab.adjust(1)                                   # sequence 1: 301
-    tab.adjust(1)                                   # sequence 2: 302
+    tab.stage()                                     # sequence 1: 301
+    tab.stage(1)
+    tab.commit()
+    tab.stage()                                     # sequence 2: 302
+    tab.stage(1)
+    tab.commit()
     app._drain()                                    # both replies are queued
     assert app.setting("runtimeLimit")["value"] == 302, app.setting("runtimeLimit")
 
@@ -683,7 +747,9 @@ def test_confirmation_reports_a_write_the_ups_ignored():
     tab = app.tabs[2]
     tab.cursor = 1
 
-    tab.adjust(1)
+    tab.stage()
+    tab.stage(1)
+    tab.commit()
     app._drain()
     assert app.setting("runtimeLimit")["value"] == 301
     assert app._confirm_at is not None
@@ -703,7 +769,9 @@ def test_confirmation_is_quiet_when_the_write_sticks():
     tab = app.tabs[2]
     tab.cursor = 1
 
-    tab.adjust(1)
+    tab.stage()
+    tab.stage(1)
+    tab.commit()
     app._drain()
     backend._settings[1]["value"] = 301             # the UPS took the write
 
@@ -714,26 +782,58 @@ def test_confirmation_is_quiet_when_the_write_sticks():
     assert app.setting("runtimeLimit")["value"] == 301
 
 
-def test_settings_turn_off_only_where_allowed():
-    screen, app, backend = _app()
+def test_settings_off_is_staged_and_applied_on_enter():
+    # A delay with a value, so staging "off" is a real change.
+    settings = copy.deepcopy(SETTINGS)
+    settings[2]["value"] = 60
+    screen, app, backend = _app(settings=settings)
     tab = app.tabs[2]
+    app.tab_index = 2
 
     tab.cursor = 1                                  # no sentinel: refused
-    tab.turn_off()
+    tab.stage_off()
+    assert tab.staged is None and not tab.editing, "nothing to stage"
     assert backend.sets == [], backend.sets
+    assert "cannot be turned off" in app.message, app.message
 
-    tab.cursor = 2                                  # sentinel: written as "off"
-    tab.turn_off()
+    tab.cursor = 2                                  # sentinel: staged, not written
+    tab.stage_off()
+    assert backend.sets == [], backend.sets
+    assert F.setting_value_text(tab.staged) == "off", tab.staged
+
+    tab.commit()
     assert backend.sets == [("delayShutdown", "off")], backend.sets
 
 
-def test_settings_enter_opens_editor_for_numeric():
+def test_settings_off_on_a_setting_already_off_writes_nothing():
+    screen, app, backend = _app()                   # delayShutdown is already off
+    tab = app.tabs[2]
+    tab.cursor = 2
+
+    tab.stage_off()
+    tab.commit()
+    assert backend.sets == [], backend.sets
+    assert app.message == "no change", app.message
+
+
+def test_settings_e_opens_the_editor_and_enter_starts_one():
     screen, app, backend = _app()
     tab = app.tabs[2]
+    app.tab_index = 2
     tab.cursor = 1
-    tab.activate_current()
+
+    app.handle("\n")                                # Enter: edit in place
+    assert tab.editing and app.dialog is None
+    app.handle("\x1b")
+
+    app.handle("e")                                 # e: type an exact number
     assert app.dialog is not None
     app.close_dialog()
+
+    tab.cursor = 0                                  # enum: no editor, a nudge
+    app.handle("e")
+    assert app.dialog is None
+    assert "←/→" in app.message, app.message
 
 
 def test_about_tab_renders():
@@ -860,12 +960,39 @@ def test_tab_switch_and_mouse():
     assert app.tab_index == 1
     app.handle("3")
     assert app.tab_index == 2
-    # On the Settings tab the arrows belong to the values, so switch tabs
-    # elsewhere before checking that the arrows still change tabs.
-    app.handle("4")
+    # Browsing Settings, the arrows keep walking the tab strip: reaching
+    # Settings must not trap you there.
+    app.handle(curses.KEY_RIGHT)
     assert app.tab_index == 3
     app.handle(curses.KEY_LEFT)
     assert app.tab_index == 2
+
+    # Once a row is being edited the arrows belong to its value instead.
+    app.handle("\n")
+    app.handle(curses.KEY_RIGHT)
+    assert app.tab_index == 2
+    app.handle(curses.KEY_LEFT)
+    assert app.tab_index == 2
+
+
+def test_leaving_settings_abandons_a_pending_edit():
+    screen, app, backend = _app()
+    tab = app.tabs[2]
+    app.tab_index = 2
+    tab.cursor = 1
+
+    app.handle("\n")
+    app.handle(curses.KEY_RIGHT)
+    assert tab.editing
+
+    app.handle("\t")                                # Tab: leave the tab
+    assert app.tab_index == 3
+    assert not tab.editing and tab.staged is None
+    assert backend.sets == [], backend.sets
+
+    app.handle("3")                                 # and back: nothing pending
+    app.draw()
+    assert not tab.editing
 
 
 def test_mouse_clicks_tabs_and_rows():
@@ -889,7 +1016,7 @@ def test_mouse_clicks_tabs_and_rows():
         assert index == 3 and app.tab_index == 3, app.tab_index
         assert screen.lines()[1][start:end + 1].strip() == "History", screen.lines()[1]
 
-        # Click a settings row: first selects it, a second click activates it.
+        # Click a settings row: first selects it, a second click starts editing.
         app.tab_index = 2
         app.draw()
         tab = app.tabs[2]
@@ -898,7 +1025,7 @@ def test_mouse_clicks_tabs_and_rows():
         app._handle_mouse()
         assert tab.cursor == row_index == 1, tab.cursor
         app._handle_mouse()
-        assert app.dialog is not None
+        assert tab.editing and app.dialog is None
     finally:
         curses.getmouse = original
 

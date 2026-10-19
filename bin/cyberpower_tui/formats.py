@@ -242,6 +242,20 @@ def parse_edit(text: str) -> tuple[str, float | None]:
         raise ValueError(f"{stripped!r} is not a number")
 
 
+def same_value(left, right) -> bool:
+    """Compare two raw setting values, treating 300 and 300.0 as equal.
+
+    Used to tell a real edit from a no-op, so staging ``off`` on a setting
+    that is already off does not turn into a pointless write.
+    """
+    if left == right:
+        return True
+    try:
+        return float(left) == float(right)
+    except (TypeError, ValueError):
+        return False
+
+
 def set_local_value(setting: dict, value) -> bool:
     """Record a value the UPS has, or is about to have, so it shows at once.
 
