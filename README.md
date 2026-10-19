@@ -119,6 +119,18 @@ Two things do need Python and Omarchy:
 `Simulate` shows fixed sample data and is the quickest way to try the widget
 without a UPS attached.
 
+This Omarchy build has no settings panel for bar widgets, so the values are
+set from the command line:
+
+```sh
+omarchy bar set io.github.kamil.cyberpower-ups showPercent false
+omarchy bar set io.github.kamil.cyberpower-ups warnBattery 25 --json
+```
+
+Without `--json` the value is stored as text, which is right for `source` and
+`upsName`; a number or a flag needs `--json` so it is stored as one. The
+widget reads both spellings either way.
+
 ## Control panel (TUI)
 
 `bin/cyberpower-ups-tui` is a full-screen control panel. It is deliberately a

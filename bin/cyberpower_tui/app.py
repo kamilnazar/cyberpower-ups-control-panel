@@ -188,7 +188,10 @@ class ControlsTab(Tab):
         W.put(screen, top, 3, "Device actions", theme.accent)
         self.hits = []
 
-        first, stop = self.window(min(height - 8, len(ACTIONS)))
+        # The pane needs a row for the title, one for the rule and one for
+        # the description under the actions; without that the tab shows
+        # nothing at all on a short terminal.
+        first, stop = self.window(max(1, min(len(ACTIONS), height - 5)))
         for index in range(first, stop):
             key, label, _ = ACTIONS[index]
             row = top + 2 + (index - first)
@@ -482,6 +485,13 @@ class HistoryTab(Tab):
     title = "History"
     SPARK_MAX = 48
 
+    def __init__(self, app):
+        super().__init__(app)
+        # Which event is selected, by what it is rather than by where it
+        # happens to be: the list is newest first, so one appended record
+        # shifts every index.
+        self._anchor: tuple | None = None
+
     def count(self) -> int:
         return len(self.app.events)
 
@@ -491,6 +501,42 @@ class HistoryTab(Tab):
     def on_show(self) -> None:
         # Always re-read: the recorder may well have appended since last time.
         self.app.request_history()
+
+    @staticmethod
+    def _event_key(event: dict) -> tuple:
+        return (event.get("t"), event.get("event"), event.get("text"))
+
+    def _anchor_to_cursor(self) -> None:
+        events = self.app.events
+        if 0 <= self.cursor < len(events):
+            self._anchor = self._event_key(events[self.cursor])
+
+    def _follow_anchor(self) -> None:
+        """Keep the same event selected when the log grows.
+
+        The event list is newest first, so a new record pushes the others
+        down by one. Without this the selection would silently land on a
+        different event.
+        """
+        if self._anchor is None:
+            self._anchor_to_cursor()
+            return
+        for index, event in enumerate(self.app.events):
+            if self._event_key(event) == self._anchor:
+                self.cursor = index
+                return
+        self._anchor = None             # the event is gone; start over
+        self._anchor_to_cursor()
+
+    def move(self, delta: int) -> None:
+        super().move(delta)
+        self._anchor_to_cursor()
+
+    def click(self, row: int) -> bool:
+        handled = super().click(row)
+        if handled:
+            self._anchor_to_cursor()
+        return handled
 
     def handle(self, key) -> bool:
         if self.is_down(key):
@@ -536,6 +582,7 @@ class HistoryTab(Tab):
 
         events = app.events
         self.hits = []
+        self._follow_anchor()
         self.cursor = max(0, min(self.cursor, len(events) - 1))
         if row < limit:
             W.put(screen, row, 3, f"Events  ({len(events)})", theme.accent)
@@ -746,7 +793,17 @@ class App:
         self._set_sequence: dict[str, int] = {}
         self._set_base: dict[str, tuple] = {}
         self._confirm_at: float | None = None
-        self._wanted: dict[str, object] = {}
+        # A write is numbered when it lands, so a settings read that was
+        # already on its way can be recognised as older than the write and
+        # must not undo it on screen.
+        self._write_serial = 0
+        # The value a write asked for, until a read that is newer than the
+        # write says what the device really holds.
+        self._wanted: dict[str, tuple] = {}
+        # The value a write put on screen that the UPS has not answered yet.
+        self._pending: dict[str, tuple] = {}
+        # The value a write was accepted with, until a fresh read agrees.
+        self._confirmed: dict[str, tuple] = {}
 
     # ------------------------------------------------------------- state
     @property
@@ -787,7 +844,12 @@ class App:
         if self._settings_pending and not force:
             return
         self._settings_pending = True
-        self.worker.submit("settings", self.backend.settings)
+        serial = self._write_serial
+
+        def job(serial=serial):
+            return serial, self.backend.settings()
+
+        self.worker.submit("settings", job)
 
     def request_history(self, force: bool = False) -> None:
         if self._history_pending and not force:
@@ -814,9 +876,11 @@ class App:
         """Timers that run when a key is not waiting: confirm writes, then poll."""
         now = time.monotonic()
         if self._confirm_at is not None and now >= self._confirm_at:
-            self._confirm_at = None
             if self.dialog is None:
+                self._confirm_at = None
                 self.request_settings(force=True)
+            # A dialog is open: the confirming read waits for it to close
+            # rather than being dropped, so the verdict is not lost.
         if now - self._last_input < 1.0:
             return
         if now - self._status_requested >= self.interval:
@@ -844,10 +908,12 @@ class App:
             setting["valueLabel"] = "off"
         else:
             F.set_local_value(setting, value)
+        # The value is on screen but the UPS has not answered yet, so a read
+        # that comes back now must not replace it.
+        self._pending[key] = (setting.get("value"), setting.get("valueLabel"))
 
         self._set_sequence[key] = self._set_sequence.get(key, 0) + 1
         sequence = self._set_sequence[key]
-        self._wanted[key] = setting.get("value")
         self._confirm_at = None          # any new write defers the check below
 
         def job(sequence=sequence, key=key, value=value):
@@ -877,8 +943,10 @@ class App:
                 if error is not None:
                     self.settings, self.settings_error = [], error
                 else:
-                    self.settings, self.settings_error = list(result), ""
-                    self._verify_writes()
+                    serial, records = result
+                    self.settings = self._apply_settings(records, serial)
+                    self.settings_error = ""
+                    self._verify_writes(serial)
             elif slot == "history":
                 self._history_pending = False
                 if error is not None:
@@ -890,16 +958,50 @@ class App:
             elif slot.startswith("action:"):
                 self._finish_action(slot[len("action:"):], result, error)
 
-    def _verify_writes(self) -> None:
+    def _apply_settings(self, records, serial: int) -> list[dict]:
+        """Take a settings read, keeping the values newer writes established.
+
+        Two things can be newer than the read: a write that has not been
+        answered yet (the device may not have taken it) and a write that was
+        accepted while the read was on its way (the device had not taken it
+        when it answered). Applying such a read as-is would undo the write in
+        the panel's eyes, so those values stay until a read that is newer
+        than the write says otherwise.
+        """
+        settings = list(records)
+        by_key = {setting.get("key"): setting for setting in settings}
+        for key, (written, value, label) in list(self._confirmed.items()):
+            setting = by_key.get(key)
+            if setting is None:
+                continue
+            if written > serial:
+                setting["value"] = value
+                setting["valueLabel"] = label
+            else:
+                self._confirmed.pop(key, None)
+        # A write that has not been answered yet is newer than any value the
+        # device has confirmed, so it is applied last and wins.
+        for key, (value, label) in self._pending.items():
+            setting = by_key.get(key)
+            if setting is not None:
+                setting["value"] = value
+                setting["valueLabel"] = label
+        return settings
+
+    def _verify_writes(self, serial: int) -> None:
         """After a confirming re-read, say so if the UPS ignored a write.
 
         Some firmwares accept a feature write and simply keep the old value
         (the UT2200EG does this for the warning/capacity limits). Silently
-        showing the value we asked for would then be a lie.
+        showing the value we asked for would then be a lie. A read that
+        predates the write cannot judge it, and neither can one that arrives
+        while a newer write is still in flight, so both are left for later.
         """
         if not self._wanted or self.dialog is not None:
             return
-        for key, wanted in list(self._wanted.items()):
+        for key, (written, wanted) in list(self._wanted.items()):
+            if written > serial or key in self._pending:
+                continue
             setting = self.setting(key)
             del self._wanted[key]
             if setting is not None and setting.get("value") != wanted:
@@ -912,23 +1014,42 @@ class App:
             self.request_settings(force=True)
             return
         sequence, key, ok, message = result
-        if sequence != self._set_sequence.get(key):
-            return                       # a newer write supersedes this reply
-        base = self._set_base.pop(key, None)
+        current = self._set_sequence.get(key)
         if ok:
             setting = self.setting(key)
             if setting is not None:
-                F.update_from_reply(setting, message)
-                self._wanted[key] = setting.get("value")
+                if sequence == current:
+                    F.update_from_reply(setting, message)
+                else:
+                    # A newer write is on screen, so the reply does not
+                    # change what is displayed -- but it still says what the
+                    # device now holds, which a later failed write has to
+                    # fall back to.
+                    shadow = dict(setting)
+                    F.update_from_reply(shadow, message)
+                    setting = shadow
+                self._write_serial += 1
+                serial = self._write_serial
+                self._wanted[key] = (serial, setting.get("value"))
+                self._confirmed[key] = (serial, setting.get("value"),
+                                        setting.get("valueLabel"))
+                self._set_base[key] = (setting.get("value"),
+                                       setting.get("valueLabel"))
+        if sequence != current:
+            return                       # a newer write supersedes this reply
+        self._pending.pop(key, None)
+        if ok:
             self.notify(message, "ok")
             # Confirm against the device once the user stops stepping, so a
             # write the firmware quietly drops does not stay on screen.
             self._confirm_at = time.monotonic() + 0.5
         else:
             setting = self.setting(key)
+            base = self._set_base.pop(key, None)
             if setting is not None and base is not None:
                 setting["value"], setting["valueLabel"] = base
             self._wanted.pop(key, None)
+            self._confirmed.pop(key, None)
             self.notify(message or "the UPS rejected that setting", "error")
             self.request_settings(force=True)
 

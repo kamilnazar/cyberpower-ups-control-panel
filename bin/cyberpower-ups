@@ -100,7 +100,8 @@ class Diag:
         """Record a traceback; returns the file it went to."""
         text = (f"{_stamp()} [{os.getpid()}] crashed: "
                 f"{' '.join(sys.argv[1:])}\n"
-                + "".join(traceback.format_exception(error)))
+                + "".join(traceback.format_exception(type(error), error,
+                                                    error.__traceback__)))
         self._append("crash.log", text + "\n")
         return self.path("crash.log")
 
@@ -612,12 +613,16 @@ class UpsDevice:
     def command(self, *usages, value: int) -> bool:
         for field in self.fields:
             if field.usage in usages and field.report_type == REPORT_FEATURE:
-                bits = self.report_bits.get((field.report_id, REPORT_FEATURE), 0)
-                body = bytearray((bits + 7) // 8)
                 try:
                     body = bytearray(self._read_report(field.report_id, REPORT_FEATURE))
-                except OSError:
-                    pass
+                except OSError as error:
+                    # A write carries the whole report, so sending a body that
+                    # was not read back would zero every other field in it --
+                    # on this UPS the shutdown thresholds share a report with
+                    # other settings. Refuse the write instead.
+                    raise NoDevice(
+                        f"report 0x{field.report_id:02x} could not be read "
+                        f"({error}); nothing was written") from error
                 while len(body) < (field.offset + field.size + 7) // 8:
                     body.append(0)
                 for bit in range(field.size):
@@ -985,7 +990,7 @@ def control_pwrstat(action: str) -> str:
 # --------------------------------------------------------------------------
 
 NUT_STATUS = {
-    "OL": "online", "OB": "onBattery", "LB": "lowBattery", "HB": "lowBattery",
+    "OL": "online", "OB": "onBattery", "LB": "lowBattery", "HB": "highBattery",
     "CHRG": "charging", "RB": "replaceBattery", "OVER": "overload",
     "TRIM": "boost", "BOOST": "boost", "OFF": "off", "ALARM": "alarm",
 }
@@ -1352,11 +1357,30 @@ def append_history(records: list[dict]) -> None:
     try:
         os.makedirs(state_dir(), exist_ok=True)
         with open(path, "a", encoding="utf-8") as handle:
-            handle.write(text)
+            _lock_history(handle)
+            try:
+                handle.write(text)
+            finally:
+                _unlock_history(handle)
     except OSError as error:
         DIAG.debug(f"cannot append to the history: {error}")
         return
     _trim_history(path)
+
+
+def _lock_history(handle) -> None:
+    """Take the history's lock, so two writers cannot interleave."""
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    except OSError:
+        pass
+
+
+def _unlock_history(handle) -> None:
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
 
 
 def _trim_history(path: str) -> None:
@@ -1364,11 +1388,18 @@ def _trim_history(path: str) -> None:
     try:
         if os.path.getsize(path) <= HISTORY_MAX_BYTES:
             return
-        with open(path, encoding="utf-8") as handle:
-            lines = handle.readlines()
-        keep = lines[len(lines) // 2:]
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.writelines(keep)
+        with open(path, "r+", encoding="utf-8") as handle:
+            _lock_history(handle)
+            try:
+                lines = handle.readlines()
+                keep = lines[len(lines) // 2:]
+                # Rewriting in place under the lock: a line another writer
+                # appended in the meantime is kept, not dropped on the floor.
+                handle.seek(0)
+                handle.truncate()
+                handle.writelines(keep)
+            finally:
+                _unlock_history(handle)
         DIAG.debug(f"history trimmed to the newest {len(keep)} line(s)")
     except OSError:
         pass
@@ -1535,8 +1566,16 @@ def listen_reports(device: "UpsDevice") -> tuple[int, ...]:
 def pushed_flags(device: "UpsDevice", cache: dict[int, bytes],
                  needed: tuple[int, ...]) -> tuple | None:
     """The status flags in one pushed burst, or None for a partial burst."""
-    if not all(report_id in cache for report_id in needed):
-        return None
+    for report_id in needed:
+        body = cache.get(report_id)
+        if body is None:
+            return None
+        bits = device.report_bits.get((report_id, REPORT_INPUT), 0)
+        if bits and len(body) < (bits + 7) // 8:
+            # A short body is a truncated report. The missing bits would read
+            # as cleared flags -- the opposite of what the device meant -- so
+            # the burst is refused rather than believed.
+            return None
     flags = device.flags_of(cache, *LISTEN_FLAGS, report_type=REPORT_INPUT)
     return tuple(int(flags.get(usage, 0)) for usage in LISTEN_FLAGS)
 

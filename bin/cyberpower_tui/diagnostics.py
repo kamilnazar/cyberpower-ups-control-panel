@@ -66,7 +66,8 @@ class Diag:
         """Record a traceback; returns the file it went to."""
         text = (f"{_stamp()} [tui {os.getpid()}] crashed: "
                 f"{' '.join(sys.argv[1:])}\n"
-                + "".join(traceback.format_exception(error)))
+                + "".join(traceback.format_exception(type(error), error,
+                                                    error.__traceback__)))
         self._append("crash.log", text + "\n")
         return self.path("crash.log")
 

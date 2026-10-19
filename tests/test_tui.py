@@ -90,6 +90,8 @@ class StubBackend:
         self._settings = copy.deepcopy(list(settings))
         self._history = copy.deepcopy(list(history))
         self.fail_keys = set()
+        # Per key: the outcome of each write in turn, True meaning "rejected".
+        self.fail_sequence: dict[str, list] = {}
         self.sets = []
         self.actions = []
 
@@ -106,11 +108,47 @@ class StubBackend:
         self.sets.append((key, value))
         if key in self.fail_keys:
             return False, "the UPS rejected that setting"
+        sequence = self.fail_sequence.get(key)
+        if sequence:
+            if sequence.pop(0):
+                return False, "the UPS rejected that setting"
         return True, f"{key} = {value}"
 
     def run_action(self, key):
         self.actions.append(key)
         return True, f"{key} sent"
+
+
+class ManualWorker:
+    """A worker whose jobs run only when the test says so.
+
+    The point is to let a slow read land *after* a write, which is the race
+    the panel has to survive.
+    """
+
+    def __init__(self):
+        self.jobs: list[tuple[str, tuple]] = []
+        self.results: list[tuple[str, object, object]] = []
+
+    def submit(self, slot, function, *args, urgent: bool = False) -> None:
+        self.jobs.append((slot, (function, args)))
+
+    def cancel(self, slot) -> None:
+        self.jobs = [job for job in self.jobs if job[0] != slot]
+
+    def take_results(self):
+        results, self.results = self.results, []
+        return results
+
+    def slots(self) -> list[str]:
+        return [slot for slot, _ in self.jobs]
+
+    def run(self, index: int = 0) -> None:
+        slot, (function, args) = self.jobs.pop(index)
+        try:
+            self.results.append((slot, function(*args), None))
+        except Exception as problem:            # a test stub, not the panel
+            self.results.append((slot, None, str(problem)))
 
 
 STATUS = {
@@ -740,6 +778,154 @@ def test_stale_write_reply_is_ignored():
     tab.commit()
     app._drain()                                    # both replies are queued
     assert app.setting("runtimeLimit")["value"] == 302, app.setting("runtimeLimit")
+
+
+def test_a_read_in_flight_does_not_undo_a_write():
+    """A settings read that was already on its way must not undo a write."""
+    screen = FakeScreen(28, 96)
+    backend = StubBackend(status=STATUS, settings=SETTINGS)
+    worker = ManualWorker()
+    app = App(screen, backend, worker=worker)
+    app.settings = copy.deepcopy(list(SETTINGS))
+    tab = app.tabs[2]
+    tab.cursor = 1
+
+    app.request_settings()                       # a read of the old values
+    tab.stage()
+    tab.stage(1)
+    tab.commit()                                 # write 301
+    assert worker.slots() == ["settings", "set:runtimeLimit"], worker.slots()
+
+    worker.run(1)                                # the write's reply lands
+    app._drain()
+    assert app.setting("runtimeLimit")["value"] == 301
+
+    worker.run(0)                                # the older read lands
+    app._drain()
+    assert app.setting("runtimeLimit")["value"] == 301, "the stale read undid it"
+
+
+def test_a_read_does_not_put_an_older_value_back():
+    """A read must not undo a write that is still in flight."""
+    screen = FakeScreen(28, 96)
+    backend = StubBackend(status=STATUS, settings=SETTINGS)
+    worker = ManualWorker()
+    app = App(screen, backend, worker=worker)
+    app.settings = copy.deepcopy(list(SETTINGS))
+    tab = app.tabs[2]
+    tab.cursor = 1
+
+    app.request_settings()                       # a read on its way
+    tab.stage()
+    tab.stage(1)
+    tab.commit()                                 # 301
+    worker.run(1)                                # the write's reply lands
+    app._drain()
+    assert app.setting("runtimeLimit")["value"] == 301
+
+    tab.stage()
+    tab.stage(1)
+    tab.commit()                                 # 302, still in flight
+    worker.run(0)                                # the old read lands
+    app._drain()
+    assert app.setting("runtimeLimit")["value"] == 302, "the read undid the write"
+
+
+def test_a_read_older_than_the_write_cannot_condemn_it():
+    """Only a read that is newer than the write may call it ignored."""
+    screen = FakeScreen(28, 96)
+    backend = StubBackend(status=STATUS, settings=SETTINGS)
+    worker = ManualWorker()
+    app = App(screen, backend, worker=worker)
+    app.settings = copy.deepcopy(list(SETTINGS))
+    tab = app.tabs[2]
+    tab.cursor = 1
+
+    app.request_settings()                       # an old read, on its way
+    tab.stage()
+    tab.stage(1)
+    tab.commit()
+    worker.run(1)                                # the write lands
+    app._drain()
+    worker.run(0)                                # the old read lands
+    app._drain()
+    assert "stayed at" not in app.message, app.message
+
+    app.request_settings(force=True)             # the confirming read
+    worker.run(0)
+    app._drain()
+    assert "stayed at 300 s" in app.message, app.message
+
+
+def test_a_rejected_write_falls_back_to_the_confirmed_value():
+    """A failed second write returns to what the UPS holds, not to the start."""
+    screen = FakeScreen(28, 96)
+    backend = StubBackend(status=STATUS, settings=SETTINGS)
+    backend.fail_sequence = {"runtimeLimit": [False, True]}   # second fails
+    app = App(screen, backend, worker=SyncWorker(backend))
+    app.settings = copy.deepcopy(list(SETTINGS))
+    tab = app.tabs[2]
+    tab.cursor = 1
+
+    tab.stage()
+    tab.stage(1)
+    tab.commit()                                 # 301, accepted
+    tab.stage()
+    tab.stage(1)
+    tab.commit()                                 # 302, rejected
+    app._drain()                                 # both replies arrive together
+    assert app.setting("runtimeLimit")["value"] == 301, app.setting("runtimeLimit")
+
+
+def test_the_confirming_read_waits_for_the_dialog():
+    """An open dialog must not swallow the check on a write."""
+    screen, app, backend = _app()
+    tab = app.tabs[2]
+    tab.cursor = 1
+
+    tab.stage()
+    tab.stage(1)
+    tab.commit()
+    app._drain()
+    assert app._confirm_at is not None
+
+    app.dialog = EditDialog(app.setting("runtimeLimit"))
+    app._confirm_at = 0.0                           # pretend the pause elapsed
+    app._maybe_poll()
+    assert app._confirm_at is not None, "the confirmation was lost"
+
+
+def test_controls_tab_shows_its_actions_on_a_short_terminal():
+    """At the minimum size the tab must still offer its actions."""
+    screen = FakeScreen(14, 56)
+    backend = StubBackend(status=STATUS, settings=SETTINGS)
+    app = App(screen, backend, worker=SyncWorker(backend))
+    app.status = STATUS
+    app.tab_index = 1
+    app.draw()
+    text = screen.text()
+    assert "Run a quick battery test" in text, text
+    assert "Abort" in text, text
+
+
+def test_history_selection_survives_a_growing_log():
+    """A new record must not move the selection to another event."""
+    screen, app, backend = _app()
+    app.history = copy.deepcopy(HISTORY)
+    tab = app.tabs[3]
+    app.tab_index = 3
+    app.draw()
+
+    tab.handle("j")                                # the second event
+    chosen = app.events[tab.cursor]
+    assert chosen["event"] == "mainsLost", chosen
+
+    newer = {"t": 1792400300, "kind": "event", "event": "batteryLow",
+             "text": "Battery low", "level": "warn"}
+    app.history = copy.deepcopy(HISTORY) + [newer]     # the recorder appended
+    app.draw()
+
+    assert app.events[tab.cursor] == chosen, "the selection moved"
 
 
 def test_confirmation_reports_a_write_the_ups_ignored():

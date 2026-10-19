@@ -14,9 +14,11 @@ import importlib.machinery
 import importlib.util
 import contextlib
 import io
+import json
 import os
 import sys
 import tempfile
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -432,6 +434,85 @@ def test_pushed_flags_need_a_complete_burst():
     seen = dict(zip(ups.LISTEN_FLAGS, flags))
     assert seen[ups.U_AC_PRESENT] == 1 and seen[ups.U_FULLY_CHARGED] == 1, seen
     assert seen[ups.U_DISCHARGING] == 0 and seen[ups.U_BOOST] == 0, seen
+
+
+def test_pushed_flags_refuse_a_truncated_report():
+    """A short body would read as cleared flags, so it is not believed."""
+    device = fake_device({})
+    needed = ups.listen_reports(device)
+    body = pushed_body(0x09)
+    assert ups.pushed_flags(device, {8: body}, needed) is not None
+    assert ups.pushed_flags(device, {8: body[:3]}, needed) is None
+    assert ups.pushed_flags(device, {8: body[:1]}, needed) is None
+
+
+def test_a_write_is_refused_when_the_report_cannot_be_read():
+    """A body that was not read back would zero every other field."""
+    device = fake_device({})
+
+    def failing(report_id, report_type):
+        raise OSError("no such device")
+
+    device._read_report = failing
+    try:
+        device.command(ups.U_AUDIBLE_ALARM, value=3)
+    except ups.NoDevice as error:
+        assert "nothing was written" in str(error), error
+    else:
+        raise AssertionError("the write should have been refused")
+
+
+def test_nut_high_battery_is_not_a_low_battery():
+    """NUT's HB means the battery has recovered; it is not a warning."""
+    with tempfile.TemporaryDirectory() as tmp:
+        upsc = os.path.join(tmp, "upsc")
+        with open(upsc, "w", encoding="utf-8") as handle:
+            handle.write("#!/bin/sh\n"
+                         "printf 'ups.status: OL HB\\n'\n"
+                         "printf 'battery.charge: 100\\n'\n")
+        os.chmod(upsc, 0o755)
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = tmp + os.pathsep + old_path
+        try:
+            data = ups.read_nut("ups1")
+        finally:
+            os.environ["PATH"] = old_path
+    assert data["status"] == "online", data
+    assert data["lowBattery"] is False, data
+
+
+def test_the_history_trim_waits_for_another_writer():
+    """The trim must not drop a line another writer is appending."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "history.jsonl")
+        old_limit = ups.HISTORY_MAX_BYTES
+        ups.HISTORY_MAX_BYTES = 400
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                for index in range(40):
+                    handle.write(json.dumps({"t": index, "kind": "sample"}) + "\n")
+
+            done = []
+            with open(path, "a", encoding="utf-8") as writer:
+                ups._lock_history(writer)
+
+                def trim():
+                    ups._trim_history(path)
+                    done.append(True)
+
+                thread = threading.Thread(target=trim)
+                thread.start()
+                time.sleep(0.2)
+                assert not done, "the trim rewrote the file under a writer"
+                writer.write(json.dumps({"t": 9999, "kind": "event"}) + "\n")
+                ups._unlock_history(writer)
+                thread.join(5)
+            assert done, "the trim never finished"
+            with open(path, encoding="utf-8") as handle:
+                records = [json.loads(line) for line in handle if line.strip()]
+        finally:
+            ups.HISTORY_MAX_BYTES = old_limit
+    assert any(record.get("t") == 9999 for record in records), records[-3:]
 
 
 def test_pushed_flags_agree_with_the_feature_reports():

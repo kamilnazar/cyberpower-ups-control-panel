@@ -36,13 +36,13 @@ BarWidget {
   }
 
   readonly property int intervalSec: Math.max(5, Number(root.setting("intervalSec", 15)) || 15)
-  readonly property bool showPercent: root.setting("showPercent", true) === true
+  readonly property bool showPercent: root.boolSetting("showPercent", true)
   readonly property string upsName: String(root.setting("upsName", "") || "")
   readonly property int warnBattery: Number(root.setting("warnBattery", 30)) || 30
   readonly property int criticalBattery: Number(root.setting("criticalBattery", 15)) || 15
   readonly property string iconPreset: String(root.setting("iconPreset", "Auto") || "Auto")
-  readonly property bool showTestControls: root.setting("showTestControls", true) === true
-  readonly property bool debug: root.setting("debug", false) === true
+  readonly property bool showTestControls: root.boolSetting("showTestControls", true)
+  readonly property bool debug: root.boolSetting("debug", false)
 
   readonly property bool present: root.status !== null && root.status.battery !== undefined
   readonly property int percent: root.present && typeof root.status.battery === "number"
@@ -78,6 +78,16 @@ BarWidget {
     if (root.vertical) return root.glyph
     if (root.showPercent && root.present) return root.glyph + " " + root.percent + "%"
     return root.glyph
+  }
+
+  // A setting's value comes from the shell as a string unless it was stored
+  // as JSON, so "true" has to be read as a boolean too.
+  function boolSetting(key, fallback) {
+    var value = root.setting(key, fallback)
+    if (value === true || value === false) return value
+    if (value === "true" || value === 1 || value === "1") return true
+    if (value === "false" || value === 0 || value === "0") return false
+    return fallback
   }
 
   function statusLabel() {
