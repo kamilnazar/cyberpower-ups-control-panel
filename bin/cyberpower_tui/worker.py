@@ -35,16 +35,20 @@ class Worker:
         self._results: queue.Queue = queue.Queue()
         self._wake = threading.Event()
         self._stopping = False
-        self._thread = threading.Thread(target=self._run, name="cyberpower-reader",
-                                        daemon=True)
+        self._thread = threading.Thread(
+            target=self._run, name="cyberpower-reader", daemon=True
+        )
         self._thread.start()
 
     # ---------------------------------------------------------- submitting
     def submit(self, slot: str, function, *args, urgent: bool = False) -> None:
         """Queue `function(*args)`; replaces any waiting job for `slot`."""
         with self._lock:
-            jobs, order = (self._urgent, self._urgent_order) if urgent \
+            jobs, order = (
+                (self._urgent, self._urgent_order)
+                if urgent
                 else (self._normal, self._normal_order)
+            )
             if slot not in jobs:
                 order.append(slot)
             jobs[slot] = (function, args)
@@ -52,8 +56,10 @@ class Worker:
 
     def cancel(self, slot: str) -> None:
         with self._lock:
-            for jobs, order in ((self._urgent, self._urgent_order),
-                                (self._normal, self._normal_order)):
+            for jobs, order in (
+                (self._urgent, self._urgent_order),
+                (self._normal, self._normal_order),
+            ):
                 if jobs.pop(slot, None) is not None:
                     try:
                         order.remove(slot)
@@ -78,8 +84,10 @@ class Worker:
     # -------------------------------------------------------------- thread
     def _next(self):
         with self._lock:
-            for jobs, order in ((self._urgent, self._urgent_order),
-                                (self._normal, self._normal_order)):
+            for jobs, order in (
+                (self._urgent, self._urgent_order),
+                (self._normal, self._normal_order),
+            ):
                 if order:
                     slot = order.pop(0)
                     function, args = jobs.pop(slot, (None, None))

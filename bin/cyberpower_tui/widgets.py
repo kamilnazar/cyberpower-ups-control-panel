@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import curses
 
-
 # ------------------------------------------------------------- text helpers
+
 
 def clip(text: str, width: int) -> str:
     """Trim to `width` cells, adding an ellipsis when something was dropped."""
@@ -21,7 +21,7 @@ def clip(text: str, width: int) -> str:
         return text
     if width == 1:
         return text[:1]
-    return text[:width - 1] + "…"
+    return text[: width - 1] + "…"
 
 
 def pad(text: str, width: int) -> str:
@@ -31,6 +31,7 @@ def pad(text: str, width: int) -> str:
 
 
 # --------------------------------------------------------------- primitives
+
 
 def put(screen, row: int, col: int, text: str, attr: int = 0) -> None:
     """Draw `text` at (row, col), clipped to the window. Never raises."""
@@ -68,8 +69,15 @@ def fill(screen, top: int, left: int, height: int, width: int, attr: int = 0) ->
         put(screen, row, left, " " * max(0, width), attr)
 
 
-def battery(screen, top: int, left: int, width: int, fraction: float,
-            frame_attr: int = 0, fill_attr: int = 0) -> int:
+def battery(
+    screen,
+    top: int,
+    left: int,
+    width: int,
+    fraction: float,
+    frame_attr: int = 0,
+    fill_attr: int = 0,
+) -> int:
     """Draw a three-row battery gauge. Returns the rows consumed."""
     if width < 8:
         return 0
@@ -111,8 +119,17 @@ def sparkline(values, width: int) -> str:
     return "".join(SPARK_LEVELS[round((value - low) / span * top)] for value in values)
 
 
-def pairs(screen, top: int, left: int, width: int, rows, theme,
-          label_width: int = 18, gap: int = 4, max_columns: int = 2) -> int:
+def pairs(
+    screen,
+    top: int,
+    left: int,
+    width: int,
+    rows,
+    theme,
+    label_width: int = 18,
+    gap: int = 4,
+    max_columns: int = 2,
+) -> int:
     """Lay (label, value) rows out in one or two columns. Returns rows used.
 
     Reading order is row-major, so items that belong together (Status/Runtime,
@@ -135,6 +152,7 @@ def pairs(screen, top: int, left: int, width: int, rows, theme,
 
 
 # -------------------------------------------------------------------- theme
+
 
 class Theme:
     """Colour pairs with a reachable monochrome fallback."""

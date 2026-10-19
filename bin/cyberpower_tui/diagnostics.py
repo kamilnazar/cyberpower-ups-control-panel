@@ -51,11 +51,11 @@ class Diag:
         try:
             os.makedirs(state_dir(), exist_ok=True)
             if os.path.exists(path) and os.path.getsize(path) > LOG_MAX_BYTES:
-                os.replace(path, path + ".1")      # keep one older generation
+                os.replace(path, path + ".1")  # keep one older generation
             with open(path, "a", encoding="utf-8") as handle:
                 handle.write(text)
         except OSError:
-            pass                                   # logging must never raise
+            pass  # logging must never raise
 
     def debug(self, message: str) -> None:
         if not self.debug_enabled:
@@ -64,10 +64,13 @@ class Diag:
 
     def crash(self, error: BaseException) -> str:
         """Record a traceback; returns the file it went to."""
-        text = (f"{_stamp()} [tui {os.getpid()}] crashed: "
-                f"{' '.join(sys.argv[1:])}\n"
-                + "".join(traceback.format_exception(type(error), error,
-                                                    error.__traceback__)))
+        text = (
+            f"{_stamp()} [tui {os.getpid()}] crashed: "
+            f"{' '.join(sys.argv[1:])}\n"
+            + "".join(
+                traceback.format_exception(type(error), error, error.__traceback__)
+            )
+        )
         self._append("crash.log", text + "\n")
         return self.path("crash.log")
 

@@ -52,9 +52,11 @@ def _history_mtime() -> int | None:
 def _setting_row(label: str, value: str, allowed: str, width: int) -> str:
     """Compose one settings row at fixed columns so it aligns when selected."""
     cells = [" "] * max(0, width)
-    for x, text in ((SETTINGS_LABEL_X, label),
-                    (SETTINGS_VALUE_X, value),
-                    (SETTINGS_ALLOWED_X, allowed)):
+    for x, text in (
+        (SETTINGS_LABEL_X, label),
+        (SETTINGS_VALUE_X, value),
+        (SETTINGS_ALLOWED_X, allowed),
+    ):
         for offset, char in enumerate(text):
             if x + offset < len(cells):
                 cells[x + offset] = char
@@ -132,6 +134,7 @@ class Tab:
 
 # -------------------------------------------------------------------- tabs
 
+
 class StatusTab(Tab):
     title = "Status"
 
@@ -144,8 +147,13 @@ class StatusTab(Tab):
         status = app.status
         if status is None:
             text = app.status_error or "reading the UPS…"
-            W.put(screen, top + 1, 3, W.clip(text, width - 6),
-                  theme.bad if app.status_error else theme.muted)
+            W.put(
+                screen,
+                top + 1,
+                3,
+                W.clip(text, width - 6),
+                theme.bad if app.status_error else theme.muted,
+            )
             return
 
         attr = theme.severity(F.severity(status))
@@ -156,12 +164,22 @@ class StatusTab(Tab):
             gauge_width = min(46, max(20, width - 34))
             W.battery(screen, row, 3, gauge_width, fraction, theme.muted, attr)
             x = 3 + gauge_width + 3
-            W.put(screen, row, x, f"{F.num(status.get('battery'), 0):>3} %",
-                  attr | curses.A_BOLD)
+            W.put(
+                screen,
+                row,
+                x,
+                f"{F.num(status.get('battery'), 0):>3} %",
+                attr | curses.A_BOLD,
+            )
             W.put(screen, row + 1, x, F.status_label(status), attr)
             if status.get("runtimeMin") is not None:
-                W.put(screen, row + 2, x, f"{F.num(status['runtimeMin'], 0)} min remaining",
-                      theme.muted)
+                W.put(
+                    screen,
+                    row + 2,
+                    x,
+                    f"{F.num(status['runtimeMin'], 0)} min remaining",
+                    theme.muted,
+                )
             row += 4
 
         flow = F.power_path(status)
@@ -170,7 +188,7 @@ class StatusTab(Tab):
             row += 2
 
         if row < limit:
-            rows = F.reading_pairs(status)[:(limit - row) * 2]
+            rows = F.reading_pairs(status)[: (limit - row) * 2]
             W.pairs(screen, row, 3, width - 6, rows, theme)
 
 
@@ -200,7 +218,9 @@ class ControlsTab(Tab):
             text = f" [ {label} ]"
             if selected:
                 body = W.pad(("▸" if enabled else "·") + text, min(width - 4, 58))
-                W.put(screen, row, 3, body, theme.selection if enabled else curses.A_DIM)
+                W.put(
+                    screen, row, 3, body, theme.selection if enabled else curses.A_DIM
+                )
             else:
                 W.put(screen, row, 3, (" " + text), theme.muted if not enabled else 0)
             self.hits.append((row, index))
@@ -211,12 +231,26 @@ class ControlsTab(Tab):
             W.rule(screen, row, 3, min(width - 6, 58), theme.muted)
             row += 1
         if row < limit:
-            W.put(screen, row, 3, W.clip(ACTIONS[self.cursor][2], width - 6), theme.muted)
+            W.put(
+                screen, row, 3, W.clip(ACTIONS[self.cursor][2], width - 6), theme.muted
+            )
             row += 2
         if row < limit and app.backend.source == "simulate":
-            W.put(screen, row, 3, "Actions are disabled for the simulate source.", theme.warn)
+            W.put(
+                screen,
+                row,
+                3,
+                "Actions are disabled for the simulate source.",
+                theme.warn,
+            )
         elif row < limit and app.status is None:
-            W.put(screen, row, 3, "No UPS is available to run actions against.", theme.warn)
+            W.put(
+                screen,
+                row,
+                3,
+                "No UPS is available to run actions against.",
+                theme.warn,
+            )
 
     def activate_current(self) -> None:
         key, label, _ = ACTIONS[self.cursor]
@@ -268,10 +302,11 @@ class SettingsTab(Tab):
 
     def hints(self) -> str:
         if self.editing:
-            return ("←/→ or +/- change   Enter apply   Esc cancel   o off   "
-                    "↑/↓ pick another row")
-        return ("↑/↓ select   Enter edit   e type value   o off   "
-                "r reload   ←/→ tabs")
+            return (
+                "←/→ or +/- change   Enter apply   Esc cancel   o off   "
+                "↑/↓ pick another row"
+            )
+        return "↑/↓ select   Enter edit   e type value   o off   " "r reload   ←/→ tabs"
 
     def on_show(self) -> None:
         if not self.app.settings and self.app.settings_error:
@@ -292,16 +327,29 @@ class SettingsTab(Tab):
             elif app._settings_pending:
                 text, attr = "reading the UPS's settings…", theme.muted
             else:
-                text, attr = "This UPS does not publish any tunable settings.", theme.muted
+                text, attr = (
+                    "This UPS does not publish any tunable settings.",
+                    theme.muted,
+                )
             W.put(screen, top + 1, 3, W.clip(text, width - 6), attr)
             return
 
         self.cursor = max(0, min(self.cursor, len(settings) - 1))
 
-        W.put(screen, top, SETTINGS_LABEL_X, W.pad("Setting", SETTINGS_LABEL_W),
-              theme.muted | curses.A_BOLD)
-        W.put(screen, top, SETTINGS_VALUE_X, W.pad("Value", SETTINGS_VALUE_W),
-              theme.muted | curses.A_BOLD)
+        W.put(
+            screen,
+            top,
+            SETTINGS_LABEL_X,
+            W.pad("Setting", SETTINGS_LABEL_W),
+            theme.muted | curses.A_BOLD,
+        )
+        W.put(
+            screen,
+            top,
+            SETTINGS_VALUE_X,
+            W.pad("Value", SETTINGS_VALUE_W),
+            theme.muted | curses.A_BOLD,
+        )
         W.put(screen, top, SETTINGS_ALLOWED_X, "Range", theme.muted | curses.A_BOLD)
 
         first, stop = self.window(height - 3)
@@ -320,17 +368,34 @@ class SettingsTab(Tab):
                 allowed = F.setting_allowed_text(setting)
             if selected:
                 line = _setting_row(label, value, allowed, width - 1)
-                W.put(screen, row, 0, line, theme.selection if writable else curses.A_DIM)
+                W.put(
+                    screen, row, 0, line, theme.selection if writable else curses.A_DIM
+                )
                 if editing:
                     # Overdraw just the value cell so the preview stands out
                     # from the selected row behind it.
-                    W.put(screen, row, SETTINGS_VALUE_X, value,
-                          theme.accent | curses.A_UNDERLINE)
+                    W.put(
+                        screen,
+                        row,
+                        SETTINGS_VALUE_X,
+                        value,
+                        theme.accent | curses.A_UNDERLINE,
+                    )
             else:
-                W.put(screen, row, SETTINGS_LABEL_X, label,
-                      theme.muted if writable else curses.A_DIM)
-                W.put(screen, row, SETTINGS_VALUE_X, value,
-                      curses.A_DIM if not writable else 0)
+                W.put(
+                    screen,
+                    row,
+                    SETTINGS_LABEL_X,
+                    label,
+                    theme.muted if writable else curses.A_DIM,
+                )
+                W.put(
+                    screen,
+                    row,
+                    SETTINGS_VALUE_X,
+                    value,
+                    curses.A_DIM if not writable else 0,
+                )
                 W.put(screen, row, SETTINGS_ALLOWED_X, allowed, theme.muted)
             self.hits.append((row, index))
 
@@ -529,7 +594,7 @@ class HistoryTab(Tab):
             if self._event_key(event) == self._anchor:
                 self.cursor = index
                 return
-        self._anchor = None             # the event is gone; start over
+        self._anchor = None  # the event is gone; start over
         self._anchor_to_cursor()
 
     def move(self, delta: int) -> None:
@@ -563,9 +628,12 @@ class HistoryTab(Tab):
             W.put(screen, row, 3, W.clip(app.history_error, width - 6), theme.bad)
             return
         if not app.history:
-            text = ("reading the recorded history…" if app.history_pending else
-                    "Nothing recorded yet — run `cyberpower-ups watch`, or enable the "
-                    "bundled systemd unit, to keep a log.")
+            text = (
+                "reading the recorded history…"
+                if app.history_pending
+                else "Nothing recorded yet — run `cyberpower-ups watch`, or enable the "
+                "bundled systemd unit, to keep a log."
+            )
             W.put(screen, row, 3, W.clip(text, width - 6), theme.muted)
             return
 
@@ -573,16 +641,29 @@ class HistoryTab(Tab):
         volts = [value for value in volts if isinstance(value, (int, float))]
         if volts:
             W.put(screen, row, 3, "Input voltage", theme.accent)
-            summary = (f"{volts[-1]:g} V now   {min(volts):g}–{max(volts):g} V over "
-                       f"{len(volts)} sample{'s' if len(volts) != 1 else ''}")
-            room = width - 20 - len(summary)          # what the graph may use
+            summary = (
+                f"{volts[-1]:g} V now   {min(volts):g}–{max(volts):g} V over "
+                f"{len(volts)} sample{'s' if len(volts) != 1 else ''}"
+            )
+            room = width - 20 - len(summary)  # what the graph may use
             if room >= 12:
                 graph_width = min(self.SPARK_MAX, room)
                 W.put(screen, row, 17, W.sparkline(volts, graph_width), theme.muted)
-                W.put(screen, row, 19 + graph_width, W.clip(summary, width - 20 - graph_width),
-                      theme.muted)
+                W.put(
+                    screen,
+                    row,
+                    19 + graph_width,
+                    W.clip(summary, width - 20 - graph_width),
+                    theme.muted,
+                )
             else:
-                W.put(screen, row, 17, W.sparkline(volts, max(12, width - 20)), theme.muted)
+                W.put(
+                    screen,
+                    row,
+                    17,
+                    W.sparkline(volts, max(12, width - 20)),
+                    theme.muted,
+                )
                 row += 1
                 W.put(screen, row, 3, W.clip(summary, width - 6), theme.muted)
             row += 2
@@ -595,8 +676,13 @@ class HistoryTab(Tab):
             row += 1
         if not events:
             if row < limit:
-                W.put(screen, row, 3, "Nothing has changed since recording started.",
-                      theme.muted)
+                W.put(
+                    screen,
+                    row,
+                    3,
+                    "Nothing has changed since recording started.",
+                    theme.muted,
+                )
             return
 
         first, stop = self.window(max(1, limit - row))
@@ -607,8 +693,13 @@ class HistoryTab(Tab):
             attr = theme.severity(record.get("level"))
             text = f" {at}  {record.get('text')}"
             if selected:
-                W.put(screen, row, 3, W.pad("▸" + text, min(width - 5, 70)),
-                      theme.selection)
+                W.put(
+                    screen,
+                    row,
+                    3,
+                    W.pad("▸" + text, min(width - 5, 70)),
+                    theme.selection,
+                )
             else:
                 W.put(screen, row, 3, W.clip(" " + text, min(width - 5, 70)), attr)
             self.hits.append((row, index))
@@ -668,6 +759,7 @@ class AboutTab(Tab):
 
 # ------------------------------------------------------------------ dialog
 
+
 class EditDialog:
     """The little modal used to type a new value for a numeric setting."""
 
@@ -679,12 +771,12 @@ class EditDialog:
 
     # -- input -----------------------------------------------------------
     def _insert(self, char: str) -> None:
-        self.buffer = self.buffer[:self.cursor] + char + self.buffer[self.cursor:]
+        self.buffer = self.buffer[: self.cursor] + char + self.buffer[self.cursor :]
         self.cursor += 1
 
     def _backspace(self) -> None:
         if self.cursor > 0:
-            self.buffer = self.buffer[:self.cursor - 1] + self.buffer[self.cursor:]
+            self.buffer = self.buffer[: self.cursor - 1] + self.buffer[self.cursor :]
             self.cursor -= 1
 
     def key(self, app, key) -> None:
@@ -699,7 +791,9 @@ class EditDialog:
                 self._backspace()
             elif key == curses.KEY_DC:
                 if self.cursor < len(self.buffer):
-                    self.buffer = self.buffer[:self.cursor] + self.buffer[self.cursor + 1:]
+                    self.buffer = (
+                        self.buffer[: self.cursor] + self.buffer[self.cursor + 1 :]
+                    )
             elif key == curses.KEY_LEFT:
                 self.cursor = max(0, self.cursor - 1)
             elif key == curses.KEY_RIGHT:
@@ -742,11 +836,15 @@ class EditDialog:
         W.put(screen, top, left + 2, " Edit setting ", theme.accent)
         W.put(screen, top + 1, left + 2, W.clip(label, box_width - 4))
         field_width = box_width - 6
-        W.put(screen, top + 3, left + 3, "┌" + "─" * (field_width - 2) + "┐", theme.muted)
+        W.put(
+            screen, top + 3, left + 3, "┌" + "─" * (field_width - 2) + "┐", theme.muted
+        )
         W.put(screen, top + 4, left + 3, "│", theme.muted)
         W.put(screen, top + 4, left + 4, W.pad(self.buffer, field_width - 2))
         W.put(screen, top + 4, left + 3 + field_width - 1, "│", theme.muted)
-        W.put(screen, top + 5, left + 3, "└" + "─" * (field_width - 2) + "┘", theme.muted)
+        W.put(
+            screen, top + 5, left + 3, "└" + "─" * (field_width - 2) + "┘", theme.muted
+        )
         W.put(screen, top + 6, left + 2, W.clip(self.note, box_width - 4), theme.muted)
 
         try:
@@ -761,6 +859,7 @@ class EditDialog:
 
 
 # --------------------------------------------------------------------- app
+
 
 class App:
     def __init__(self, screen, backend: Backend, interval: float = 5.0, worker=None):
@@ -781,8 +880,13 @@ class App:
         self.message_kind = "info"
         self.dialog: EditDialog | None = None
 
-        self.tabs = [StatusTab(self), ControlsTab(self), SettingsTab(self),
-                     HistoryTab(self), AboutTab(self)]
+        self.tabs = [
+            StatusTab(self),
+            ControlsTab(self),
+            SettingsTab(self),
+            HistoryTab(self),
+            AboutTab(self),
+        ]
         self.tab_index = 0
         self.running = True
         self._tab_hits: list[tuple[int, int, int]] = []
@@ -834,8 +938,9 @@ class App:
     @property
     def events(self) -> list[dict]:
         """The recorded events, newest first — a log reads that way round."""
-        return [record for record in reversed(self.history)
-                if record.get("kind") == "event"]
+        return [
+            record for record in reversed(self.history) if record.get("kind") == "event"
+        ]
 
     # ------------------------------------------------------------ reads
     def request_status(self, force: bool = False) -> None:
@@ -897,8 +1002,9 @@ class App:
     # ----------------------------------------------------------- writes
     def run_action(self, key: str) -> None:
         self.notify("sending…")
-        self.worker.submit(f"action:{key}",
-                           lambda key=key: self.backend.run_action(key), urgent=True)
+        self.worker.submit(
+            f"action:{key}", lambda key=key: self.backend.run_action(key), urgent=True
+        )
 
     def apply_setting(self, setting: dict, value) -> None:
         """Show the new value now, write it in the background.
@@ -908,7 +1014,9 @@ class App:
         UPS confirmed.
         """
         key = setting["key"]
-        self._set_base.setdefault(key, (setting.get("value"), setting.get("valueLabel")))
+        self._set_base.setdefault(
+            key, (setting.get("value"), setting.get("valueLabel"))
+        )
         if str(value).strip().lower() == "off":
             setting["value"] = None
             setting["valueLabel"] = "off"
@@ -920,7 +1028,7 @@ class App:
 
         self._set_sequence[key] = self._set_sequence.get(key, 0) + 1
         sequence = self._set_sequence[key]
-        self._confirm_at = None          # any new write defers the check below
+        self._confirm_at = None  # any new write defers the check below
 
         def job(sequence=sequence, key=key, value=value):
             ok, message = self.backend.set_value(key, value)
@@ -962,7 +1070,7 @@ class App:
             elif slot.startswith("set:"):
                 self._finish_set(result, error)
             elif slot.startswith("action:"):
-                self._finish_action(slot[len("action:"):], result, error)
+                self._finish_action(slot[len("action:") :], result, error)
 
     def _apply_settings(self, records, serial: int) -> list[dict]:
         """Take a settings read, keeping the values newer writes established.
@@ -1011,8 +1119,10 @@ class App:
             setting = self.setting(key)
             del self._wanted[key]
             if setting is not None and setting.get("value") != wanted:
-                self.notify(f"{setting['label']} stayed at "
-                            f"{F.setting_value_text(setting)}", "warn")
+                self.notify(
+                    f"{setting['label']} stayed at " f"{F.setting_value_text(setting)}",
+                    "warn",
+                )
 
     def _finish_set(self, result, error) -> None:
         if error is not None:
@@ -1037,12 +1147,14 @@ class App:
                 self._write_serial += 1
                 serial = self._write_serial
                 self._wanted[key] = (serial, setting.get("value"))
-                self._confirmed[key] = (serial, setting.get("value"),
-                                        setting.get("valueLabel"))
-                self._set_base[key] = (setting.get("value"),
-                                       setting.get("valueLabel"))
+                self._confirmed[key] = (
+                    serial,
+                    setting.get("value"),
+                    setting.get("valueLabel"),
+                )
+                self._set_base[key] = (setting.get("value"), setting.get("valueLabel"))
         if sequence != current:
-            return                       # a newer write supersedes this reply
+            return  # a newer write supersedes this reply
         self._pending.pop(key, None)
         if ok:
             self.notify(message, "ok")
@@ -1078,8 +1190,13 @@ class App:
         screen.erase()
         height, width = screen.getmaxyx()
         if height < 14 or width < 56:
-            W.put(screen, 0, 0, "Terminal too small — enlarge to at least 56x14.",
-                  curses.A_BOLD)
+            W.put(
+                screen,
+                0,
+                0,
+                "Terminal too small — enlarge to at least 56x14.",
+                curses.A_BOLD,
+            )
             screen.refresh()
             return
 
@@ -1091,9 +1208,16 @@ class App:
         self.tab.draw(top, height - 4 - top + 1, width)
 
         W.rule(screen, height - 3, 0, width, self.theme.muted)
-        W.put(screen, height - 2, 2, W.clip(self.message, width - 4),
-              self.theme.severity(self.message_kind))
-        W.put(screen, height - 1, 2, W.clip(self.tab.hints(), width - 4), self.theme.muted)
+        W.put(
+            screen,
+            height - 2,
+            2,
+            W.clip(self.message, width - 4),
+            self.theme.severity(self.message_kind),
+        )
+        W.put(
+            screen, height - 1, 2, W.clip(self.tab.hints(), width - 4), self.theme.muted
+        )
 
         if self.dialog is not None:
             self.dialog.draw(self)
@@ -1226,15 +1350,26 @@ class App:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="cyberpower-ups-tui",
-        description="Interactive control panel for a CyberPower UPS")
-    parser.add_argument("--source", default="auto",
-                        choices=["auto", "hidraw", "pwrstat", "nut", "simulate"])
+        description="Interactive control panel for a CyberPower UPS",
+    )
+    parser.add_argument(
+        "--source",
+        default="auto",
+        choices=["auto", "hidraw", "pwrstat", "nut", "simulate"],
+    )
     parser.add_argument("--ups", default=None, help="NUT UPS name")
-    parser.add_argument("--interval", type=float, default=5.0,
-                        help="seconds between automatic status polls")
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=5.0,
+        help="seconds between automatic status polls",
+    )
     parser.add_argument("--reader", default=DEFAULT_READER, help=argparse.SUPPRESS)
-    parser.add_argument("--debug", action="store_true",
-                        help="append every reader call to the debug trace")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="append every reader call to the debug trace",
+    )
     args = parser.parse_args(argv)
 
     DIAG.debug_enabled = args.debug or bool(os.environ.get("CYBERPOWER_UPS_DEBUG"))

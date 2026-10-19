@@ -402,6 +402,13 @@ python3 tests/test_reader.py   # the HID/backend side
 python3 tests/test_tui.py      # the control panel
 ```
 
+The Python is formatted with [black](https://black.readthedocs.io/), pinned to
+88 columns in `pyproject.toml`:
+
+```bash
+black bin tests
+```
+
 The reader tests build a report descriptor shaped like a `CP1500PFCLCD`'s, feed
 it synthetic feature reports, and check the parser, the extraction, the unit
 handling, the pwrstat text parsing, the control-action dispatch and the

@@ -1,0 +1,5 @@
+[tool.black]
+# The code is written to 88 columns, which is black's default; pinning it
+# here keeps a run of a newer black from reformatting everything again.
+line-length = 88
+target-version = ["py38"]

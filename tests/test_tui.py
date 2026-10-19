@@ -22,17 +22,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BIN = os.path.join(HERE, "..", "bin")
 sys.path.insert(0, BIN)
 
-from cyberpower_tui import formats as F           # noqa: E402
-from cyberpower_tui import widgets as W           # noqa: E402
-from cyberpower_tui import app as app_module      # noqa: E402
-from cyberpower_tui.app import App, EditDialog    # noqa: E402
+from cyberpower_tui import formats as F  # noqa: E402
+from cyberpower_tui import widgets as W  # noqa: E402
+from cyberpower_tui import app as app_module  # noqa: E402
+from cyberpower_tui.app import App, EditDialog  # noqa: E402
 from cyberpower_tui.backend import Backend, BackendError  # noqa: E402
-from cyberpower_tui.worker import SyncWorker, Worker       # noqa: E402
-
+from cyberpower_tui.worker import SyncWorker, Worker  # noqa: E402
 
 # --------------------------------------------------------------------------
 # a curses screen that keeps its characters in a grid
 # --------------------------------------------------------------------------
+
 
 class FakeScreen:
     def __init__(self, height, width):
@@ -78,6 +78,7 @@ class FakeScreen:
 # --------------------------------------------------------------------------
 # a stand-in for the reader, plus a stub script for the backend tests
 # --------------------------------------------------------------------------
+
 
 class StubBackend:
     """Implements the small surface App uses, without spawning anything."""
@@ -147,7 +148,7 @@ class ManualWorker:
         slot, (function, args) = self.jobs.pop(index)
         try:
             self.results.append((slot, function(*args), None))
-        except Exception as problem:            # a test stub, not the panel
+        except Exception as problem:  # a test stub, not the panel
             self.results.append((slot, None, str(problem)))
 
 
@@ -167,15 +168,40 @@ STATUS = {
 }
 
 SETTINGS = [
-    {"key": "alarm", "label": "Audible alarm", "value": 2, "valueLabel": "enabled",
-     "choices": {"1": "disabled", "2": "enabled", "3": "muted"},
-     "min": 1, "max": 3, "step": 1, "offAllowed": False, "writable": True},
-    {"key": "runtimeLimit", "label": "Shut down at runtime", "value": 300,
-     "unit": "s", "min": 0, "max": 600, "step": 1, "offAllowed": False,
-     "writable": True},
-    {"key": "delayShutdown", "label": "Delay before shutdown", "value": None,
-     "unit": "s", "min": 0, "max": 1966020, "step": 60, "offAllowed": True,
-     "writable": True},
+    {
+        "key": "alarm",
+        "label": "Audible alarm",
+        "value": 2,
+        "valueLabel": "enabled",
+        "choices": {"1": "disabled", "2": "enabled", "3": "muted"},
+        "min": 1,
+        "max": 3,
+        "step": 1,
+        "offAllowed": False,
+        "writable": True,
+    },
+    {
+        "key": "runtimeLimit",
+        "label": "Shut down at runtime",
+        "value": 300,
+        "unit": "s",
+        "min": 0,
+        "max": 600,
+        "step": 1,
+        "offAllowed": False,
+        "writable": True,
+    },
+    {
+        "key": "delayShutdown",
+        "label": "Delay before shutdown",
+        "value": None,
+        "unit": "s",
+        "min": 0,
+        "max": 1966020,
+        "step": 60,
+        "offAllowed": True,
+        "writable": True,
+    },
 ]
 
 STUB_BODY = """
@@ -198,16 +224,47 @@ else:
 
 #: A short recording: alternating samples and the two events between them.
 HISTORY = [
-    {"t": 1792400000, "kind": "sample", "inputVoltage": 229.0, "outputVoltage": 229.0,
-     "loadPercent": 14, "battery": 100, "runtimeMin": 60},
-    {"t": 1792400060, "kind": "sample", "inputVoltage": 231.0, "outputVoltage": 231.0,
-     "loadPercent": 15, "battery": 100, "runtimeMin": 59},
-    {"t": 1792400120, "kind": "event", "event": "mainsLost",
-     "text": "Mains power lost (input 0 V)", "level": "bad"},
-    {"t": 1792400180, "kind": "sample", "inputVoltage": 236.0, "outputVoltage": 231.0,
-     "loadPercent": 16, "battery": 99, "runtimeMin": 50},
-    {"t": 1792400240, "kind": "event", "event": "mainsRestored",
-     "text": "Mains power restored (input 231 V)", "level": "info"},
+    {
+        "t": 1792400000,
+        "kind": "sample",
+        "inputVoltage": 229.0,
+        "outputVoltage": 229.0,
+        "loadPercent": 14,
+        "battery": 100,
+        "runtimeMin": 60,
+    },
+    {
+        "t": 1792400060,
+        "kind": "sample",
+        "inputVoltage": 231.0,
+        "outputVoltage": 231.0,
+        "loadPercent": 15,
+        "battery": 100,
+        "runtimeMin": 59,
+    },
+    {
+        "t": 1792400120,
+        "kind": "event",
+        "event": "mainsLost",
+        "text": "Mains power lost (input 0 V)",
+        "level": "bad",
+    },
+    {
+        "t": 1792400180,
+        "kind": "sample",
+        "inputVoltage": 236.0,
+        "outputVoltage": 231.0,
+        "loadPercent": 16,
+        "battery": 99,
+        "runtimeMin": 50,
+    },
+    {
+        "t": 1792400240,
+        "kind": "event",
+        "event": "mainsRestored",
+        "text": "Mains power restored (input 231 V)",
+        "level": "info",
+    },
 ]
 
 
@@ -222,6 +279,7 @@ def _script(directory, body, name="reader"):
 # --------------------------------------------------------------------------
 # formats: the pure text helpers
 # --------------------------------------------------------------------------
+
 
 def test_reading_pairs():
     pairs = dict(F.reading_pairs(STATUS))
@@ -275,19 +333,19 @@ def test_setting_allowed_text():
 
 
 def test_cycle_enum_wraps():
-    assert F.cycle_enum(SETTINGS[0], 1) == 3          # enabled -> muted
-    assert F.cycle_enum(SETTINGS[0], -1) == 1         # enabled -> disabled
+    assert F.cycle_enum(SETTINGS[0], 1) == 3  # enabled -> muted
+    assert F.cycle_enum(SETTINGS[0], -1) == 1  # enabled -> disabled
     muted = dict(SETTINGS[0], value=3, valueLabel="muted")
-    assert F.cycle_enum(muted, 1) == 1                # wrapped back around
+    assert F.cycle_enum(muted, 1) == 1  # wrapped back around
 
 
 def test_step_numeric_clamps():
     assert F.step_numeric(SETTINGS[1], 1) == 301
     assert F.step_numeric(SETTINGS[1], -1) == 299
     top = dict(SETTINGS[1], value=600)
-    assert F.step_numeric(top, 1) == 600              # clamped to max
+    assert F.step_numeric(top, 1) == 600  # clamped to max
     floor = dict(SETTINGS[1], value=0)
-    assert F.step_numeric(floor, -1) == 0             # clamped to min
+    assert F.step_numeric(floor, -1) == 0  # clamped to min
 
 
 def test_parse_edit():
@@ -312,9 +370,9 @@ def test_clip_and_pad():
 
 
 def test_same_value_sees_through_int_float_and_none():
-    assert F.same_value(300, 300.0) is True         # 300 and 300.0 are one value
-    assert F.same_value("2", 2) is True             # the reader may quote numbers
-    assert F.same_value(None, None) is True         # "off" twice is no change
+    assert F.same_value(300, 300.0) is True  # 300 and 300.0 are one value
+    assert F.same_value("2", 2) is True  # the reader may quote numbers
+    assert F.same_value(None, None) is True  # "off" twice is no change
     assert F.same_value(300, 301) is False
     assert F.same_value(None, 60) is False
     assert F.same_value("off", None) is False
@@ -328,8 +386,8 @@ def test_set_local_value():
     enum = dict(SETTINGS[0])
     assert F.set_local_value(enum, 3) is True
     assert (enum["value"], enum["valueLabel"]) == (3, "muted")
-    assert F.set_local_value(enum, 9) is False      # not a choice
-    assert enum["value"] == 3                       # left untouched
+    assert F.set_local_value(enum, 9) is False  # not a choice
+    assert enum["value"] == 3  # left untouched
 
     off = dict(SETTINGS[2])
     assert F.set_local_value(off, None) is True
@@ -356,6 +414,7 @@ def test_update_from_reply():
 # --------------------------------------------------------------------------
 # the worker: the UI never blocks on the reader
 # --------------------------------------------------------------------------
+
 
 def _wait_for(worker, count, timeout=5.0):
     deadline = time.monotonic() + timeout
@@ -418,7 +477,9 @@ def test_worker_reports_errors_instead_of_dying():
     try:
         worker.submit("boom", boom)
         worker.submit("after", lambda: "still alive")
-        results = dict((slot, (result, error)) for slot, result, error in _wait_for(worker, 2))
+        results = dict(
+            (slot, (result, error)) for slot, result, error in _wait_for(worker, 2)
+        )
         assert results["boom"][0] is None and "nope" in results["boom"][1], results
         assert results["after"] == ("still alive", None), results
     finally:
@@ -444,6 +505,7 @@ def test_worker_cancel_drops_a_waiting_job():
 # --------------------------------------------------------------------------
 # backend: it really does shell out to the reader
 # --------------------------------------------------------------------------
+
 
 def test_backend_reads_the_reader():
     with tempfile.TemporaryDirectory() as tmp:
@@ -492,10 +554,14 @@ def test_backend_history_reads_jsonl_and_skips_damage():
 
 def test_backend_error_text_hides_the_crash_hint():
     import subprocess
+
     result = subprocess.CompletedProcess(
-        ["reader"], 1, "",
+        ["reader"],
+        1,
+        "",
         "ValueError: boom\n"
-        "traceback written to /home/u/.local/state/cyberpower-ups/crash.log\n")
+        "traceback written to /home/u/.local/state/cyberpower-ups/crash.log\n",
+    )
     assert Backend._error_text(result) == "ValueError: boom"
     empty = subprocess.CompletedProcess(["reader"], 3, "", "")
     assert Backend._error_text(empty) == "exit 3"
@@ -516,8 +582,8 @@ def test_backend_rejects_garbage_json():
 # diagnostics: the panel's own crash log and its trace of reader calls
 # --------------------------------------------------------------------------
 
-import contextlib      # noqa: E402
-from cyberpower_tui import diagnostics as D   # noqa: E402
+import contextlib  # noqa: E402
+from cyberpower_tui import diagnostics as D  # noqa: E402
 
 
 @contextlib.contextmanager
@@ -587,6 +653,7 @@ def test_panel_trace_records_a_failing_call():
 # --------------------------------------------------------------------------
 # the app: draw each tab into the fake screen
 # --------------------------------------------------------------------------
+
 
 def _app(width=96, height=28, status=STATUS, settings=SETTINGS):
     screen = FakeScreen(height, width)
@@ -664,22 +731,22 @@ def test_settings_enter_starts_an_edit_and_arrows_preview():
     tab = app.tabs[2]
     app.tab_index = 2
 
-    tab.cursor = 0                                  # enum
-    app.handle("\n")                                # Enter: start editing
+    tab.cursor = 0  # enum
+    app.handle("\n")  # Enter: start editing
     assert tab.editing and backend.sets == [], backend.sets
 
-    app.handle(curses.KEY_RIGHT)                    # preview, still no write
+    app.handle(curses.KEY_RIGHT)  # preview, still no write
     assert backend.sets == [], backend.sets
     assert F.setting_value_text(tab.staged) == "‹ muted ›", tab.staged
-    assert app.setting("alarm")["valueLabel"] == "enabled"   # untouched
+    assert app.setting("alarm")["valueLabel"] == "enabled"  # untouched
 
-    app.handle("\n")                                # Enter: the one write
+    app.handle("\n")  # Enter: the one write
     assert backend.sets == [("alarm", "3")], backend.sets
     assert app.setting("alarm")["valueLabel"] == "muted", app.setting("alarm")
     assert not tab.editing
 
-    tab.cursor = 1                                  # numeric
-    tab.stage()                                     # start editing
+    tab.cursor = 1  # numeric
+    tab.stage()  # start editing
     tab.stage(1)
     tab.stage(1)
     assert backend.sets == [("alarm", "3")], backend.sets
@@ -695,7 +762,7 @@ def test_settings_escape_discards_a_preview():
 
     app.handle("\n")
     app.handle(curses.KEY_RIGHT)
-    assert app.setting("runtimeLimit")["value"] == 300      # never touched
+    assert app.setting("runtimeLimit")["value"] == 300  # never touched
     app.handle("\x1b")
     assert not tab.editing and tab.staged is None
     assert backend.sets == [], backend.sets
@@ -709,7 +776,7 @@ def test_settings_moving_away_discards_a_preview():
 
     tab.stage()
     tab.stage(1)
-    tab.handle(curses.KEY_DOWN)                     # move to the next row
+    tab.handle(curses.KEY_DOWN)  # move to the next row
     assert tab.cursor == 2 and not tab.editing
     assert backend.sets == [], backend.sets
     assert "discarded" in app.message, app.message
@@ -722,7 +789,7 @@ def test_settings_enter_on_an_unchanged_row_writes_nothing():
     tab.cursor = 1
 
     app.handle("\n")
-    app.handle("\n")                                # apply without changing
+    app.handle("\n")  # apply without changing
     assert backend.sets == [], backend.sets
     assert app.message == "no change", app.message
 
@@ -731,12 +798,12 @@ def test_setting_write_is_optimistic():
     """A write shows up in the UI before the reader has even answered."""
     screen, app, backend = _app()
     tab = app.tabs[2]
-    tab.cursor = 1                                  # runtimeLimit, 300 s
+    tab.cursor = 1  # runtimeLimit, 300 s
 
     tab.stage()
     tab.stage(1)
     tab.commit()
-    assert app.setting("runtimeLimit")["value"] == 301      # already on screen
+    assert app.setting("runtimeLimit")["value"] == 301  # already on screen
     assert backend.sets == [("runtimeLimit", "301")]
 
     app._drain()
@@ -770,13 +837,13 @@ def test_stale_write_reply_is_ignored():
     tab = app.tabs[2]
     tab.cursor = 1
 
-    tab.stage()                                     # sequence 1: 301
+    tab.stage()  # sequence 1: 301
     tab.stage(1)
     tab.commit()
-    tab.stage()                                     # sequence 2: 302
+    tab.stage()  # sequence 2: 302
     tab.stage(1)
     tab.commit()
-    app._drain()                                    # both replies are queued
+    app._drain()  # both replies are queued
     assert app.setting("runtimeLimit")["value"] == 302, app.setting("runtimeLimit")
 
 
@@ -791,7 +858,7 @@ def test_a_failed_read_leaves_no_stale_click_targets():
     app.draw()
     assert tab.hits, "the rows should be clickable"
 
-    app.settings = []                              # the read failed
+    app.settings = []  # the read failed
     app.settings_error = "the UPS did not answer"
     app.draw()
     assert tab.hits == [], tab.hits
@@ -809,17 +876,17 @@ def test_the_stale_reply_arriving_last_is_ignored():
     tab = app.tabs[2]
     tab.cursor = 1
 
-    tab.stage()                                     # sequence 1: 301
+    tab.stage()  # sequence 1: 301
     tab.stage(1)
     tab.commit()
-    tab.stage()                                     # sequence 2: 302
+    tab.stage()  # sequence 2: 302
     tab.stage(1)
     tab.commit()
-    worker.run(1)                                   # the newer reply first
+    worker.run(1)  # the newer reply first
     app._drain()
     assert app.setting("runtimeLimit")["value"] == 302, app.setting("runtimeLimit")
 
-    worker.run(0)                                   # the stale reply arrives last
+    worker.run(0)  # the stale reply arrives last
     app._drain()
     assert app.setting("runtimeLimit")["value"] == 302, app.setting("runtimeLimit")
 
@@ -834,17 +901,17 @@ def test_a_read_in_flight_does_not_undo_a_write():
     tab = app.tabs[2]
     tab.cursor = 1
 
-    app.request_settings()                       # a read of the old values
+    app.request_settings()  # a read of the old values
     tab.stage()
     tab.stage(1)
-    tab.commit()                                 # write 301
+    tab.commit()  # write 301
     assert worker.slots() == ["settings", "set:runtimeLimit"], worker.slots()
 
-    worker.run(1)                                # the write's reply lands
+    worker.run(1)  # the write's reply lands
     app._drain()
     assert app.setting("runtimeLimit")["value"] == 301
 
-    worker.run(0)                                # the older read lands
+    worker.run(0)  # the older read lands
     app._drain()
     assert app.setting("runtimeLimit")["value"] == 301, "the stale read undid it"
 
@@ -859,18 +926,18 @@ def test_a_read_does_not_put_an_older_value_back():
     tab = app.tabs[2]
     tab.cursor = 1
 
-    app.request_settings()                       # a read on its way
+    app.request_settings()  # a read on its way
     tab.stage()
     tab.stage(1)
-    tab.commit()                                 # 301
-    worker.run(1)                                # the write's reply lands
+    tab.commit()  # 301
+    worker.run(1)  # the write's reply lands
     app._drain()
     assert app.setting("runtimeLimit")["value"] == 301
 
     tab.stage()
     tab.stage(1)
-    tab.commit()                                 # 302, still in flight
-    worker.run(0)                                # the old read lands
+    tab.commit()  # 302, still in flight
+    worker.run(0)  # the old read lands
     app._drain()
     assert app.setting("runtimeLimit")["value"] == 302, "the read undid the write"
 
@@ -885,17 +952,17 @@ def test_a_read_older_than_the_write_cannot_condemn_it():
     tab = app.tabs[2]
     tab.cursor = 1
 
-    app.request_settings()                       # an old read, on its way
+    app.request_settings()  # an old read, on its way
     tab.stage()
     tab.stage(1)
     tab.commit()
-    worker.run(1)                                # the write lands
+    worker.run(1)  # the write lands
     app._drain()
-    worker.run(0)                                # the old read lands
+    worker.run(0)  # the old read lands
     app._drain()
     assert "stayed at" not in app.message, app.message
 
-    app.request_settings(force=True)             # the confirming read
+    app.request_settings(force=True)  # the confirming read
     worker.run(0)
     app._drain()
     assert "stayed at 300 s" in app.message, app.message
@@ -905,7 +972,7 @@ def test_a_rejected_write_falls_back_to_the_confirmed_value():
     """A failed second write returns to what the UPS holds, not to the start."""
     screen = FakeScreen(28, 96)
     backend = StubBackend(status=STATUS, settings=SETTINGS)
-    backend.fail_sequence = {"runtimeLimit": [False, True]}   # second fails
+    backend.fail_sequence = {"runtimeLimit": [False, True]}  # second fails
     app = App(screen, backend, worker=SyncWorker(backend))
     app.settings = copy.deepcopy(list(SETTINGS))
     tab = app.tabs[2]
@@ -913,11 +980,11 @@ def test_a_rejected_write_falls_back_to_the_confirmed_value():
 
     tab.stage()
     tab.stage(1)
-    tab.commit()                                 # 301, accepted
+    tab.commit()  # 301, accepted
     tab.stage()
     tab.stage(1)
-    tab.commit()                                 # 302, rejected
-    app._drain()                                 # both replies arrive together
+    tab.commit()  # 302, rejected
+    app._drain()  # both replies arrive together
     assert app.setting("runtimeLimit")["value"] == 301, app.setting("runtimeLimit")
 
 
@@ -934,7 +1001,7 @@ def test_the_confirming_read_waits_for_the_dialog():
     assert app._confirm_at is not None
 
     app.dialog = EditDialog(app.setting("runtimeLimit"))
-    app._confirm_at = 0.0                           # pretend the pause elapsed
+    app._confirm_at = 0.0  # pretend the pause elapsed
     app._maybe_poll()
     assert app._confirm_at is not None, "the confirmation was lost"
 
@@ -960,13 +1027,18 @@ def test_history_selection_survives_a_growing_log():
     app.tab_index = 3
     app.draw()
 
-    tab.handle("j")                                # the second event
+    tab.handle("j")  # the second event
     chosen = app.events[tab.cursor]
     assert chosen["event"] == "mainsLost", chosen
 
-    newer = {"t": 1792400300, "kind": "event", "event": "batteryLow",
-             "text": "Battery low", "level": "warn"}
-    app.history = copy.deepcopy(HISTORY) + [newer]     # the recorder appended
+    newer = {
+        "t": 1792400300,
+        "kind": "event",
+        "event": "batteryLow",
+        "text": "Battery low",
+        "level": "warn",
+    }
+    app.history = copy.deepcopy(HISTORY) + [newer]  # the recorder appended
     app.draw()
 
     assert app.events[tab.cursor] == chosen, "the selection moved"
@@ -974,7 +1046,7 @@ def test_history_selection_survives_a_growing_log():
 
 def test_confirmation_reports_a_write_the_ups_ignored():
     """Some firmwares accept a write and keep the old value; say so."""
-    screen, app, backend = _app()                   # the stub never changes
+    screen, app, backend = _app()  # the stub never changes
     tab = app.tabs[2]
     tab.cursor = 1
 
@@ -985,7 +1057,7 @@ def test_confirmation_reports_a_write_the_ups_ignored():
     assert app.setting("runtimeLimit")["value"] == 301
     assert app._confirm_at is not None
 
-    app._confirm_at = 0.0                           # pretend the pause elapsed
+    app._confirm_at = 0.0  # pretend the pause elapsed
     app._maybe_poll()
     app._drain()
     assert app.setting("runtimeLimit")["value"] == 300, app.setting("runtimeLimit")
@@ -1004,7 +1076,7 @@ def test_confirmation_is_quiet_when_the_write_sticks():
     tab.stage(1)
     tab.commit()
     app._drain()
-    backend._settings[1]["value"] = 301             # the UPS took the write
+    backend._settings[1]["value"] = 301  # the UPS took the write
 
     app._confirm_at = 0.0
     app._maybe_poll()
@@ -1021,13 +1093,13 @@ def test_settings_off_is_staged_and_applied_on_enter():
     tab = app.tabs[2]
     app.tab_index = 2
 
-    tab.cursor = 1                                  # no sentinel: refused
+    tab.cursor = 1  # no sentinel: refused
     tab.stage_off()
     assert tab.staged is None and not tab.editing, "nothing to stage"
     assert backend.sets == [], backend.sets
     assert "cannot be turned off" in app.message, app.message
 
-    tab.cursor = 2                                  # sentinel: staged, not written
+    tab.cursor = 2  # sentinel: staged, not written
     tab.stage_off()
     assert backend.sets == [], backend.sets
     assert F.setting_value_text(tab.staged) == "off", tab.staged
@@ -1037,7 +1109,7 @@ def test_settings_off_is_staged_and_applied_on_enter():
 
 
 def test_settings_off_on_a_setting_already_off_writes_nothing():
-    screen, app, backend = _app()                   # delayShutdown is already off
+    screen, app, backend = _app()  # delayShutdown is already off
     tab = app.tabs[2]
     tab.cursor = 2
 
@@ -1053,15 +1125,15 @@ def test_settings_e_opens_the_editor_and_enter_starts_one():
     app.tab_index = 2
     tab.cursor = 1
 
-    app.handle("\n")                                # Enter: edit in place
+    app.handle("\n")  # Enter: edit in place
     assert tab.editing and app.dialog is None
     app.handle("\x1b")
 
-    app.handle("e")                                 # e: type an exact number
+    app.handle("e")  # e: type an exact number
     assert app.dialog is not None
     app.close_dialog()
 
-    tab.cursor = 0                                  # enum: no editor, a nudge
+    tab.cursor = 0  # enum: no editor, a nudge
     app.handle("e")
     assert app.dialog is None
     assert "←/→" in app.message, app.message
@@ -1080,9 +1152,9 @@ def test_about_tab_renders():
 
 def test_sparkline():
     assert W.sparkline([], 10) == ""
-    assert W.sparkline([230, 230, 230], 10) == "▅▅▅"       # flat draws a level line
-    assert len(W.sparkline(range(100), 12)) == 12          # squeezed to width
-    assert W.sparkline([1, 2, 3], 3) == "▁▅█"              # scaled to its own range
+    assert W.sparkline([230, 230, 230], 10) == "▅▅▅"  # flat draws a level line
+    assert len(W.sparkline(range(100), 12)) == 12  # squeezed to width
+    assert W.sparkline([1, 2, 3], 3) == "▁▅█"  # scaled to its own range
 
 
 def test_history_tab_renders_the_voltage_and_the_events():
@@ -1144,12 +1216,17 @@ def test_history_is_read_when_the_tab_opens():
     app = App(screen, backend, worker=SyncWorker(backend))
     app.draw()
 
-    app.select_tab(3)                                  # on_show asks for the log
+    app.select_tab(3)  # on_show asks for the log
     assert app.history_pending is True
     app._drain()
     assert app.history_pending is False
-    assert [record["kind"] for record in app.history] == ["sample", "sample", "event",
-                                                          "sample", "event"]
+    assert [record["kind"] for record in app.history] == [
+        "sample",
+        "sample",
+        "event",
+        "sample",
+        "event",
+    ]
     app.draw()
     assert "Mains power lost" in screen.text()
 
@@ -1169,12 +1246,12 @@ def test_history_refreshes_when_the_log_grows():
         app._drain()
         assert len(calls) == 1, calls
 
-        app._history_checked = 0.0                     # let the check interval pass
-        app._maybe_poll()                              # nothing was appended...
+        app._history_checked = 0.0  # let the check interval pass
+        app._maybe_poll()  # nothing was appended...
         app._drain()
         assert len(calls) == 1, "an unchanged log must not be re-read"
 
-        clock["mtime"] = 101                           # the recorder appended
+        clock["mtime"] = 101  # the recorder appended
         app._history_checked = 0.0
         app._maybe_poll()
         app._drain()
@@ -1201,7 +1278,7 @@ def test_reopening_the_history_tab_reloads_it():
     original = backend.history
     backend.history = lambda limit=400: (calls.append(1), original(limit))[1]
 
-    app.history = copy.deepcopy(HISTORY)               # read once already
+    app.history = copy.deepcopy(HISTORY)  # read once already
     app.select_tab(3)
     app._drain()
     assert len(calls) == 1, "on_show must refresh, not skip a loaded tab"
@@ -1210,7 +1287,9 @@ def test_reopening_the_history_tab_reloads_it():
 def test_history_failure_is_shown_not_hidden():
     screen = FakeScreen(28, 96)
     backend = StubBackend(status=STATUS, settings=SETTINGS)
-    backend.history = lambda limit=400: (_ for _ in ()).throw(BackendError("no history"))
+    backend.history = lambda limit=400: (_ for _ in ()).throw(
+        BackendError("no history")
+    )
     app = App(screen, backend, worker=SyncWorker(backend))
     app.tab_index = 3
 
@@ -1269,12 +1348,12 @@ def test_leaving_settings_abandons_a_pending_edit():
     app.handle(curses.KEY_RIGHT)
     assert tab.editing
 
-    app.handle("\t")                                # Tab: leave the tab
+    app.handle("\t")  # Tab: leave the tab
     assert app.tab_index == 3
     assert not tab.editing and tab.staged is None
     assert backend.sets == [], backend.sets
 
-    app.handle("3")                                 # and back: nothing pending
+    app.handle("3")  # and back: nothing pending
     app.draw()
     assert not tab.editing
 
@@ -1298,7 +1377,9 @@ def test_mouse_clicks_tabs_and_rows():
         curses.getmouse = lambda: (0, (start + end) // 2, 1, 0, 0)
         app._handle_mouse()
         assert index == 3 and app.tab_index == 3, app.tab_index
-        assert screen.lines()[1][start:end + 1].strip() == "History", screen.lines()[1]
+        assert screen.lines()[1][start : end + 1].strip() == "History", screen.lines()[
+            1
+        ]
 
         # Click a settings row: first selects it, a second click starts editing.
         app.tab_index = 2
@@ -1317,6 +1398,7 @@ def test_mouse_clicks_tabs_and_rows():
 # --------------------------------------------------------------------------
 # the edit dialog
 # --------------------------------------------------------------------------
+
 
 def test_edit_dialog_typing_and_applying():
     screen, app, backend = _app()
@@ -1340,7 +1422,7 @@ def test_edit_dialog_typing_and_applying():
 def test_edit_dialog_off_and_cancel():
     screen, app, backend = _app()
 
-    dialog = EditDialog(copy.deepcopy(SETTINGS[2]))   # allows off
+    dialog = EditDialog(copy.deepcopy(SETTINGS[2]))  # allows off
     dialog.key(app, curses.KEY_BACKSPACE)
     for char in "off":
         dialog.key(app, char)
@@ -1348,7 +1430,7 @@ def test_edit_dialog_off_and_cancel():
     dialog.key(app, "\n")
     assert backend.sets == [("delayShutdown", "off")], backend.sets
 
-    dialog = EditDialog(copy.deepcopy(SETTINGS[1]))   # Esc just closes
+    dialog = EditDialog(copy.deepcopy(SETTINGS[1]))  # Esc just closes
     app.dialog = dialog
     dialog.key(app, "\x1b")
     assert app.dialog is None

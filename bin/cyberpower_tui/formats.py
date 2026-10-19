@@ -27,6 +27,7 @@ SEVERITY_BAD = "bad"
 
 # --------------------------------------------------------------- numbers
 
+
 def num(value, digits: int = 1) -> str:
     """Render a number the way a device panel would: 236 not 236.0."""
     if value is None or value == "":
@@ -42,6 +43,7 @@ def num(value, digits: int = 1) -> str:
 
 
 # ---------------------------------------------------------------- status
+
 
 def status_label(status: dict | None) -> str:
     if not status:
@@ -135,6 +137,7 @@ def power_path(status: dict | None) -> str:
 
 
 # -------------------------------------------------------------- settings
+
 
 def is_enum(setting: dict) -> bool:
     return bool(setting.get("choices"))
@@ -294,7 +297,7 @@ def update_from_reply(setting: dict, message: str) -> bool:
     prefix = f"{setting.get('key')} = "
     if not message or not message.startswith(prefix):
         return False
-    text = message[len(prefix):].strip()
+    text = message[len(prefix) :].strip()
     if text.lower() == "off":
         setting["value"] = None
         setting["valueLabel"] = "off"

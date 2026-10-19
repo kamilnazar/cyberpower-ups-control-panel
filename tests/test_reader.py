@@ -34,6 +34,7 @@ loader.exec_module(ups)
 # a report descriptor, assembled item by item
 # --------------------------------------------------------------------------
 
+
 def tag(prefix, value):
     """Encode a short HID item: prefix is the tag byte with a size of 0."""
     if -128 <= value <= 127:
@@ -73,8 +74,8 @@ def u32(prefix, value):
 def build_descriptor():
     """A descriptor shaped like a CyberPower CP1500PFCLCD's."""
     d = b""
-    d += u16(PAGE, 0x84) + u8(USAGE, 0x04) + u8(COLLECTION, 0x01)   # ~ UPS, Application
-    d += u8(USAGE, 0x24) + u8(COLLECTION, 0x00)                     # ~ PowerSummary, Physical
+    d += u16(PAGE, 0x84) + u8(USAGE, 0x04) + u8(COLLECTION, 0x01)  # ~ UPS, Application
+    d += u8(USAGE, 0x24) + u8(COLLECTION, 0x00)  # ~ PowerSummary, Physical
     # Battery charge / runtime / status flags: report 8
     d += u8(REPORT_ID, 0x08)
     d += u16(PAGE, 0x85)
@@ -86,7 +87,7 @@ def build_descriptor():
     d += u8(USAGE, 0x42) + u8(USAGE, 0x4B)
     d += u8(LOG_MIN, 0) + u8(LOG_MAX, 1) + u8(REPORT_SIZE, 1) + u8(REPORT_COUNT, 6)
     d += u8(FEATURE, 0x02)
-    d += u8(REPORT_COUNT, 2) + u8(FEATURE, 0x03)                    # padding
+    d += u8(REPORT_COUNT, 2) + u8(FEATURE, 0x03)  # padding
     # Report 8 is declared a second time as input reports. The UT2200EG does
     # just this: it pushes the values it would otherwise have to be asked for,
     # so a listener can have them without making a request. Same layout, only
@@ -99,17 +100,17 @@ def build_descriptor():
     d += u8(USAGE, 0x42) + u8(USAGE, 0x4B)
     d += u8(LOG_MIN, 0) + u8(LOG_MAX, 1) + u8(REPORT_SIZE, 1) + u8(REPORT_COUNT, 6)
     d += u8(INPUT, 0x02)
-    d += u8(REPORT_COUNT, 2) + u8(INPUT, 0x03)                      # padding
+    d += u8(REPORT_COUNT, 2) + u8(INPUT, 0x03)  # padding
     d += bytes([END_COLLECTION])
     # Input voltage / frequency: report 0x10
     d += u16(PAGE, 0x84)
     d += u8(USAGE, 0x1A) + u8(COLLECTION, 0x00)
     d += u8(REPORT_ID, 0x10)
     d += u8(USAGE, 0x30) + u8(LOG_MIN, 0) + u16(LOG_MAX, 511)
-    d += u32(UNIT, 0x00F0D121) + u8(UNIT_EXP, 0x07)                 # volts
+    d += u32(UNIT, 0x00F0D121) + u8(UNIT_EXP, 0x07)  # volts
     d += u8(REPORT_SIZE, 16) + u8(REPORT_COUNT, 1) + u8(FEATURE, 0x02)
     d += u8(USAGE, 0x32) + u8(LOG_MAX, 100)
-    d += u32(UNIT, 0x0000F001) + u8(UNIT_EXP, 0x0F)                 # 0.1 Hz
+    d += u32(UNIT, 0x0000F001) + u8(UNIT_EXP, 0x0F)  # 0.1 Hz
     d += u8(REPORT_SIZE, 16) + u8(REPORT_COUNT, 1) + u8(FEATURE, 0x02)
     d += bytes([END_COLLECTION])
     # Output voltage / load: report 0x12
@@ -119,7 +120,12 @@ def build_descriptor():
     d += u32(UNIT, 0x00F0D121) + u8(UNIT_EXP, 0x07)
     d += u8(REPORT_SIZE, 16) + u8(REPORT_COUNT, 1) + u8(FEATURE, 0x02)
     d += u8(USAGE, 0x35) + u8(LOG_MAX, 100)
-    d += u32(UNIT, 0x00000000) + u8(UNIT_EXP, 0x00) + u8(REPORT_SIZE, 8) + u8(REPORT_COUNT, 1)
+    d += (
+        u32(UNIT, 0x00000000)
+        + u8(UNIT_EXP, 0x00)
+        + u8(REPORT_SIZE, 8)
+        + u8(REPORT_COUNT, 1)
+    )
     d += u8(FEATURE, 0x02)
     d += bytes([END_COLLECTION])
     # Battery voltage: report 0x13
@@ -130,7 +136,7 @@ def build_descriptor():
     d += u8(REPORT_SIZE, 16) + u8(REPORT_COUNT, 1) + u8(FEATURE, 0x02)
     d += bytes([END_COLLECTION])
     # Configurable settings: alarm, transfer voltages: report 0x20
-    d += u8(USAGE, 0x24) + u8(COLLECTION, 0x00)                     # PowerSummary
+    d += u8(USAGE, 0x24) + u8(COLLECTION, 0x00)  # PowerSummary
     d += u8(REPORT_ID, 0x20)
     d += u8(USAGE, 0x5A) + u8(LOG_MIN, 1) + u8(LOG_MAX, 3)
     d += u8(REPORT_SIZE, 8) + u8(REPORT_COUNT, 1) + u8(FEATURE, 0x02)
@@ -148,7 +154,7 @@ def build_descriptor():
     d += u8(REPORT_SIZE, 8) + u8(REPORT_COUNT, 1) + u8(FEATURE, 0x02)
     d += u8(USAGE, 0x29) + u8(LOG_MIN, 0) + u8(LOG_MAX, 100)
     d += u8(REPORT_SIZE, 8) + u8(REPORT_COUNT, 1) + u8(FEATURE, 0x02)
-    d += bytes([END_COLLECTION])                                          # ~ UPS
+    d += bytes([END_COLLECTION])  # ~ UPS
     return d
 
 
@@ -178,12 +184,25 @@ def test_descriptor_fields():
     assert (runtime.offset, runtime.size) == (8, 16)
 
     # Status flags share one byte after the runtime word, one bit each.
-    offsets = {usage: by_usage[usage][0].offset for usage in
-               (ups.U_AC_PRESENT, ups.U_CHARGING, ups.U_DISCHARGING,
-                ups.U_FULLY_CHARGED, ups.U_BELOW_CAPACITY_LIMIT, ups.U_NEED_REPLACEMENT)}
-    assert offsets == {ups.U_AC_PRESENT: 24, ups.U_CHARGING: 25, ups.U_DISCHARGING: 26,
-                       ups.U_FULLY_CHARGED: 27, ups.U_BELOW_CAPACITY_LIMIT: 28,
-                       ups.U_NEED_REPLACEMENT: 29}, offsets
+    offsets = {
+        usage: by_usage[usage][0].offset
+        for usage in (
+            ups.U_AC_PRESENT,
+            ups.U_CHARGING,
+            ups.U_DISCHARGING,
+            ups.U_FULLY_CHARGED,
+            ups.U_BELOW_CAPACITY_LIMIT,
+            ups.U_NEED_REPLACEMENT,
+        )
+    }
+    assert offsets == {
+        ups.U_AC_PRESENT: 24,
+        ups.U_CHARGING: 25,
+        ups.U_DISCHARGING: 26,
+        ups.U_FULLY_CHARGED: 27,
+        ups.U_BELOW_CAPACITY_LIMIT: 28,
+        ups.U_NEED_REPLACEMENT: 29,
+    }, offsets
 
     assert bits[(8, ups.REPORT_FEATURE)] == 32, bits
     assert bits[(0x10, ups.REPORT_FEATURE)] == 32, bits
@@ -199,7 +218,9 @@ def test_extraction():
 
 def test_readings():
     # 100%, 3600 s runtime, ACPresent + FullyCharged set
-    reports = {0x08: bytes.fromhex("64") + (3600).to_bytes(2, "little") + bytes.fromhex("09")}
+    reports = {
+        0x08: bytes.fromhex("64") + (3600).to_bytes(2, "little") + bytes.fromhex("09")
+    }
     reports[0x10] = (230).to_bytes(2, "little") + (500).to_bytes(2, "little")
     reports[0x12] = (230).to_bytes(2, "little") + bytes([14])
     reports[0x13] = (136).to_bytes(2, "little")
@@ -220,7 +241,9 @@ def test_readings():
 
 
 def test_on_battery_and_low():
-    reports = {0x08: bytes.fromhex("0f") + (900).to_bytes(2, "little") + bytes.fromhex("14")}
+    reports = {
+        0x08: bytes.fromhex("0f") + (900).to_bytes(2, "little") + bytes.fromhex("14")
+    }
     # 15% charge, 900 s, Discharging + BelowRemainingCapacityLimit
     reports[0x10] = (0).to_bytes(2, "little") + (0).to_bytes(2, "little")
     reports[0x12] = (0).to_bytes(2, "little") + bytes([40])
@@ -322,7 +345,11 @@ def test_config_and_set():
 
     assert settings["alarm"]["value"] == 2
     assert settings["alarm"]["valueLabel"] == "enabled"
-    assert settings["alarm"]["choices"] == {"1": "disabled", "2": "enabled", "3": "muted"}
+    assert settings["alarm"]["choices"] == {
+        "1": "disabled",
+        "2": "enabled",
+        "3": "muted",
+    }
     assert settings["warningLimit"]["value"] == 30
     assert settings["capacityLimit"]["value"] == 10
 
@@ -358,8 +385,9 @@ def test_set_off_sentinel():
     A negative logical minimum means "off" (delay disabled). Writing the
     string "off" must land the sentinel itself, not a clamped zero.
     """
-    field = ups.Field(size=16, log_min=-1, log_max=32767,
-                      phy_min=-60, phy_max=1966020, has_phy=1)
+    field = ups.Field(
+        size=16, log_min=-1, log_max=32767, phy_min=-60, phy_max=1966020, has_phy=1
+    )
     calls = []
 
     class FakeDevice:
@@ -394,11 +422,12 @@ def test_set_off_sentinel():
 
 def test_physical_mapping():
     """A logical/physical range is converted both ways, sentinel included."""
-    field = ups.Field(size=16, log_min=-1, log_max=32767,
-                      phy_min=-60, phy_max=1966020, has_phy=1)
-    assert ups._logical_value(field, 0xFFFF) == -1          # all-ones is signed -1
+    field = ups.Field(
+        size=16, log_min=-1, log_max=32767, phy_min=-60, phy_max=1966020, has_phy=1
+    )
+    assert ups._logical_value(field, 0xFFFF) == -1  # all-ones is signed -1
     assert ups.to_physical(field, 0xFFFF) == -60.0
-    assert ups.to_physical(field, 10) == 600.0              # logical minutes -> seconds
+    assert ups.to_physical(field, 10) == 600.0  # logical minutes -> seconds
     assert ups._physical_to_logical(field, 600) == 10
     assert ups._physical_to_logical(field, 0) == 0
 
@@ -406,6 +435,7 @@ def test_physical_mapping():
 # --------------------------------------------------------------------------
 # listening: reacting to the reports the UPS pushes by itself
 # --------------------------------------------------------------------------
+
 
 #: the status byte, as the device would push it: 100% charge, 3600 s runtime
 def pushed_body(flags_byte):
@@ -453,7 +483,7 @@ def test_a_write_is_refused_when_the_report_cannot_be_read():
         with open(path, "wb"):
             pass
         device = fake_device({})
-        device.path = path                   # the node opens; the read fails
+        device.path = path  # the node opens; the read fails
 
         def failing(report_id, report_type, fd=None):
             raise OSError("no such device")
@@ -472,9 +502,11 @@ def test_nut_high_battery_is_not_a_low_battery():
     with tempfile.TemporaryDirectory() as tmp:
         upsc = os.path.join(tmp, "upsc")
         with open(upsc, "w", encoding="utf-8") as handle:
-            handle.write("#!/bin/sh\n"
-                         "printf 'ups.status: OL HB\\n'\n"
-                         "printf 'battery.charge: 100\\n'\n")
+            handle.write(
+                "#!/bin/sh\n"
+                "printf 'ups.status: OL HB\\n'\n"
+                "printf 'battery.charge: 100\\n'\n"
+            )
         os.chmod(upsc, 0o755)
         old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = tmp + os.pathsep + old_path
@@ -522,7 +554,7 @@ def test_the_history_trim_waits_for_another_writer():
 
 def test_pushed_flags_agree_with_the_feature_reports():
     """The pushed copy decodes to what a poll would have read."""
-    body = pushed_body(0x0D)                        # AC present + discharging
+    body = pushed_body(0x0D)  # AC present + discharging
     device = fake_device({8: body})
     pushed = ups.pushed_flags(device, {8: body}, ups.listen_reports(device))
     feature = device.flags_of({8: body}, *ups.LISTEN_FLAGS)
@@ -538,8 +570,11 @@ def test_listen_records_only_when_a_pushed_flag_moves():
     """
     import threading
 
-    original = {"read_hidraw": ups.read_hidraw, "LISTEN_QUIET": ups.LISTEN_QUIET,
-                "LISTEN_TICK": ups.LISTEN_TICK}
+    original = {
+        "read_hidraw": ups.read_hidraw,
+        "LISTEN_QUIET": ups.LISTEN_QUIET,
+        "LISTEN_TICK": ups.LISTEN_TICK,
+    }
     with temp_state(), tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "pushed")
         os.mkfifo(path)
@@ -551,34 +586,36 @@ def test_listen_records_only_when_a_pushed_flag_moves():
 
         def fake_read_hidraw(device=None):
             readings.append(state["discharging"])
-            return reading(online=not state["discharging"],
-                           onBattery=state["discharging"],
-                           status="onBattery" if state["discharging"] else "fullyCharged")
+            return reading(
+                online=not state["discharging"],
+                onBattery=state["discharging"],
+                status="onBattery" if state["discharging"] else "fullyCharged",
+            )
 
         failures = []
 
         def run():
             try:
                 ups._listen_loop(ups.Recorder(), 60.0, device)
-            except BaseException as error:      # the loop only ever leaves by raising
+            except BaseException as error:  # the loop only ever leaves by raising
                 failures.append(error)
 
         ups.read_hidraw = fake_read_hidraw
-        ups.LISTEN_QUIET = 0.2                  # keep the test quick
+        ups.LISTEN_QUIET = 0.2  # keep the test quick
         ups.LISTEN_TICK = 0.05
         try:
             thread = threading.Thread(target=run, daemon=True)
             thread.start()
-            time.sleep(0.3)                     # the reader opens, then the first reading
+            time.sleep(0.3)  # the reader opens, then the first reading
             writer = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
-            os.write(writer, pushed_record(0x09))           # mains up, fully charged
+            os.write(writer, pushed_record(0x09))  # mains up, fully charged
             time.sleep(0.5)
             state["discharging"] = True
-            os.write(writer, pushed_record(0x0D))           # ...now on battery
+            os.write(writer, pushed_record(0x0D))  # ...now on battery
             time.sleep(0.5)
-            os.write(writer, pushed_record(0x0D))           # a repeat changes nothing
+            os.write(writer, pushed_record(0x0D))  # a repeat changes nothing
             time.sleep(0.5)
-            os.close(writer)                                # unplugged
+            os.close(writer)  # unplugged
             thread.join(timeout=5)
         finally:
             ups.read_hidraw = original["read_hidraw"]
@@ -592,8 +629,10 @@ def test_listen_records_only_when_a_pushed_flag_moves():
         assert readings == [False, True], readings
         records = ups.read_history()
         assert [record["kind"] for record in records].count("sample") == 2, records
-        assert [record["event"] for record in records if record["kind"] == "event"] \
-            == ["mainsLost", "onBattery"], records
+        assert [record["event"] for record in records if record["kind"] == "event"] == [
+            "mainsLost",
+            "onBattery",
+        ], records
 
 
 def test_listen_falls_back_to_polling_without_an_endpoint():
@@ -601,7 +640,9 @@ def test_listen_falls_back_to_polling_without_an_endpoint():
     calls = []
     original_poll = ups.poll_loop
     try:
-        ups.poll_loop = lambda rec, interval, source, ups_name: calls.append(source) or 0
+        ups.poll_loop = (
+            lambda rec, interval, source, ups_name: calls.append(source) or 0
+        )
         assert ups.watch(60.0, "pwrstat", None, False, listen=True) == 0
         assert calls == ["pwrstat"], calls
     finally:
@@ -611,6 +652,7 @@ def test_listen_falls_back_to_polling_without_an_endpoint():
 # --------------------------------------------------------------------------
 # diagnostics: the crash log and the opt-in debug trace
 # --------------------------------------------------------------------------
+
 
 @contextlib.contextmanager
 def temp_state():
@@ -677,6 +719,7 @@ def test_main_traces_a_run_and_echoes_with_debug():
 # history: samples, and the events between them
 # --------------------------------------------------------------------------
 
+
 def reading(**overrides):
     base = dict(ups.SIMULATED)
     base["updated"] = int(time.time())
@@ -705,24 +748,37 @@ def test_events_report_mains_and_battery():
 
 def test_events_report_regulation_and_overload():
     before = reading()
-    assert [event["event"] for event in ups.events_between(before, reading(boost=True))] == ["boost"]
-    assert [event["event"] for event in ups.events_between(before, reading(overload=True))] == ["overload"]
-    assert [event["event"] for event in ups.events_between(before, reading(replaceBattery=True))] \
-        == ["replaceBattery"]
+    assert [
+        event["event"] for event in ups.events_between(before, reading(boost=True))
+    ] == ["boost"]
+    assert [
+        event["event"] for event in ups.events_between(before, reading(overload=True))
+    ] == ["overload"]
+    assert [
+        event["event"]
+        for event in ups.events_between(before, reading(replaceBattery=True))
+    ] == ["replaceBattery"]
 
 
 def test_events_report_voltage_out_of_band():
-    before = reading()                                  # 231 V against 230 V nominal
+    before = reading()  # 231 V against 230 V nominal
     high = ups.events_between(before, reading(inputVoltage=260.0))
     assert [event["event"] for event in high] == ["voltageHigh"], high
     assert "above 10% of nominal" in high[0]["text"], high
 
-    assert [event["event"] for event in ups.events_between(before, reading(inputVoltage=180.0))] \
-        == ["voltageLow"]
+    assert [
+        event["event"]
+        for event in ups.events_between(before, reading(inputVoltage=180.0))
+    ] == ["voltageLow"]
     # staying out of band is one line, not one per sample...
-    assert ups.events_between(reading(inputVoltage=260.0), reading(inputVoltage=258.0)) == []
+    assert (
+        ups.events_between(reading(inputVoltage=260.0), reading(inputVoltage=258.0))
+        == []
+    )
     # ...and coming back is another
-    normal = ups.events_between(reading(inputVoltage=260.0), reading(inputVoltage=231.0))
+    normal = ups.events_between(
+        reading(inputVoltage=260.0), reading(inputVoltage=231.0)
+    )
     assert [event["event"] for event in normal] == ["voltageNormal"]
 
     # a narrower band on the same reading counts as out of range
@@ -731,8 +787,9 @@ def test_events_report_voltage_out_of_band():
 
 
 def test_events_report_a_finished_test():
-    events = ups.events_between(reading(testResult="No test initiated"),
-                                reading(testResult="Passed"))
+    events = ups.events_between(
+        reading(testResult="No test initiated"), reading(testResult="Passed")
+    )
     assert [event["event"] for event in events] == ["testResult"]
     assert "Passed" in events[0]["text"]
 
@@ -746,8 +803,12 @@ def test_sample_record_keeps_only_the_reading_fields():
 
 def test_history_appends_reads_back_and_filters():
     with temp_state():
-        ups.append_history([ups.sample_record(reading(updated=100)),
-                            ups._event("x", "hello", "info", int(time.time()))])
+        ups.append_history(
+            [
+                ups.sample_record(reading(updated=100)),
+                ups._event("x", "hello", "info", int(time.time())),
+            ]
+        )
         records = ups.read_history()
         assert len(records) == 2 and records[1]["text"] == "hello"
         assert ups.select_history(records, None, None, events_only=True) == [records[1]]
@@ -765,7 +826,7 @@ def test_history_survives_damage_and_keeps_the_newest():
         assert [record["text"] for record in ups.read_history()] == ["old"]
 
         original = ups.HISTORY_MAX_BYTES
-        ups.HISTORY_MAX_BYTES = 120                     # smaller than one sample
+        ups.HISTORY_MAX_BYTES = 120  # smaller than one sample
         try:
             for index in range(6):
                 ups.append_history([ups.sample_record(reading(updated=100 + index))])

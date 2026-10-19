@@ -28,14 +28,22 @@ DEFAULT_READER = os.path.join(
 
 #: Device actions, in menu order: (key the reader understands, label, blurb).
 ACTIONS = (
-    ("quick", "Run a quick battery test",
-     "Switches the UPS to battery for a few seconds; the unit beeps."),
-    ("deep", "Run a deep battery test",
-     "Discharges the battery further; can take a minute or more."),
-    ("abort", "Abort a running battery test",
-     "Stops a test in progress and returns to normal operation."),
-    ("mute", "Mute the alarm",
-     "Silences the alarm until the next power event."),
+    (
+        "quick",
+        "Run a quick battery test",
+        "Switches the UPS to battery for a few seconds; the unit beeps.",
+    ),
+    (
+        "deep",
+        "Run a deep battery test",
+        "Discharges the battery further; can take a minute or more.",
+    ),
+    (
+        "abort",
+        "Abort a running battery test",
+        "Stops a test in progress and returns to normal operation.",
+    ),
+    ("mute", "Mute the alarm", "Silences the alarm until the next power event."),
 )
 
 
@@ -46,8 +54,13 @@ class BackendError(Exception):
 class Backend:
     """Runs the reader and normalises its output."""
 
-    def __init__(self, reader: str = DEFAULT_READER, source: str = "auto",
-                 ups: str | None = None, debug: bool = False):
+    def __init__(
+        self,
+        reader: str = DEFAULT_READER,
+        source: str = "auto",
+        ups: str | None = None,
+        debug: bool = False,
+    ):
         self.reader = reader
         self.source = source
         self.ups = ups
@@ -60,14 +73,16 @@ class Backend:
         if self.ups:
             argv += ["--ups", self.ups]
         if self.debug:
-            argv.append("--debug")      # let the reader trace its own reads too
+            argv.append("--debug")  # let the reader trace its own reads too
         return argv
 
     def _run(self, *args: str, timeout: float = 15.0) -> subprocess.CompletedProcess:
         argv = self._argv(*args)
         started = time.monotonic()
         try:
-            result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+            result = subprocess.run(
+                argv, capture_output=True, text=True, timeout=timeout
+            )
         except FileNotFoundError as error:
             DIAG.debug(f"{' '.join(argv)} -> reader not found")
             raise BackendError(f"reader not found: {self.reader}") from error
@@ -80,14 +95,19 @@ class Backend:
         note = ""
         if result.returncode != 0:
             note = f" stderr={((result.stderr or '').strip() or '(empty)')!r}"
-        DIAG.debug(f"{' '.join(argv)} -> rc={result.returncode} "
-                   f"{(time.monotonic() - started) * 1000:.0f} ms{note}")
+        DIAG.debug(
+            f"{' '.join(argv)} -> rc={result.returncode} "
+            f"{(time.monotonic() - started) * 1000:.0f} ms{note}"
+        )
         return result
 
     @staticmethod
     def _error_text(result: subprocess.CompletedProcess) -> str:
-        lines = [line for line in (result.stderr or result.stdout).strip().splitlines()
-                 if not line.startswith("traceback written to")]
+        lines = [
+            line
+            for line in (result.stderr or result.stdout).strip().splitlines()
+            if not line.startswith("traceback written to")
+        ]
         return lines[-1] if lines else f"exit {result.returncode}"
 
     # --------------------------------------------------------------- reads
@@ -129,7 +149,7 @@ class Backend:
             try:
                 record = json.loads(line)
             except ValueError:
-                continue                       # a torn line is not fatal
+                continue  # a torn line is not fatal
             if isinstance(record, dict) and record.get("kind"):
                 records.append(record)
         return records
