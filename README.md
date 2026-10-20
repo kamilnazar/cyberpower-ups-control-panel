@@ -306,9 +306,16 @@ you, and the widget never needs it:
 # from this plugin's directory
 mkdir -p ~/.config/systemd/user
 cp systemd/cyberpower-ups-watch.service ~/.config/systemd/user/
-systemctl --user enable --now cyberpower-ups-watch.service
+systemctl --user enable cyberpower-ups-watch.service
 journalctl --user -u cyberpower-ups-watch -f      # events as they happen
 ```
+
+The unit is enabled into `graphical-session.target`, so the recorder starts
+with the desktop and stops with it — no `--now` needed, and it is not running
+on a bare TTY login. Do not add `Wants=graphical-session.target` to it: that
+target is what uwsm uses to decide whether a compositor session is already
+running, and pulling it in from a unit of your own makes uwsm refuse to start
+the compositor, which leaves you at a black screen after login.
 
 If you installed the plugin somewhere other than
 `~/.config/omarchy/plugins/io.github.kamil.cyberpower-ups/`, edit the unit's

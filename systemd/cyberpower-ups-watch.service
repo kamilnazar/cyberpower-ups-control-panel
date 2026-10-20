@@ -5,8 +5,16 @@ Documentation=file:%h/.config/omarchy/plugins/io.github.kamil.cyberpower-ups/REA
 # (udev/60-cyberpower-ups.rules) installed for the logged-in user. The seat
 # sets that rule up, so the recorder waits for the session rather than
 # starting before the node is readable.
+#
+# The unit is enabled into graphical-session.target.wants, so the target
+# starts the recorder. It must NOT pull the target in with Wants=:
+# graphical-session.target is what uwsm uses to decide whether a compositor
+# session is already running, so pulling it in from a unit that starts with
+# default.target makes uwsm refuse to start the compositor ("A compositor or
+# graphical-session* target is already active!") and the session dies with a
+# black screen. After= and PartOf= give the ordering without the pull-in.
 After=graphical-session.target
-Wants=graphical-session.target
+PartOf=graphical-session.target
 # A plugin installed somewhere else needs this path changed too.
 ConditionPathExists=%h/.config/omarchy/plugins/io.github.kamil.cyberpower-ups/bin/cyberpower-ups
 # A wrong path should not be retried forever.
@@ -27,4 +35,4 @@ Restart=on-failure
 RestartSec=30
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
