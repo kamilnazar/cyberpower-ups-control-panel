@@ -179,6 +179,7 @@ SETTINGS = [
         "step": 1,
         "offAllowed": False,
         "writable": True,
+        "help": "Beeps when the mains fails or the battery runs low.",
     },
     {
         "key": "runtimeLimit",
@@ -190,6 +191,12 @@ SETTINGS = [
         "step": 1,
         "offAllowed": False,
         "writable": True,
+        "help": (
+            "How long the UPS keeps the output up after the mains fails. It "
+            "counts from the moment the mains goes, not from the charge: on "
+            "this unit 300 s cut the power five minutes into an outage, at 58% "
+            "charge, with 22 minutes of estimated runtime still showing."
+        ),
     },
     {
         "key": "delayShutdown",
@@ -724,6 +731,47 @@ def test_settings_tab_renders():
     assert "‹ enabled ›" in text, text
     assert "disabled · enabled · muted" in text, text
     assert "off · 0 – 1,966,020 s" in text, text
+
+
+def test_settings_tab_explains_the_selected_setting():
+    """The row under the cursor says what the setting does."""
+    screen, app, _ = _app()
+    app.tab_index = 2
+    app.draw()
+    text = screen.text()
+    assert "Beeps when the mains fails" in text, text
+    assert "How long the UPS keeps the output up" not in text, text
+
+    app.tabs[2].cursor = 1  # the next setting down
+    app.draw()
+    text = screen.text()
+    assert "How long the UPS keeps the output up" in text, text
+    assert "Beeps when the mains fails" not in text, text
+
+
+def test_settings_tab_explains_nothing_without_settings():
+    """A failed read has nothing to explain."""
+    screen, app, _ = _app()
+    app.tab_index = 2
+    app.settings = []
+    app.settings_error = "the UPS did not answer"
+    app.draw()
+    text = screen.text()
+    assert "the UPS did not answer" in text, text
+    assert "Beeps when the mains fails" not in text, text
+
+
+def test_settings_tab_keeps_the_table_in_a_short_terminal():
+    """A short terminal must not lose the settings to the explanation."""
+    screen, app, _ = _app(width=60, height=16)
+    app.tab_index = 2
+    app.tabs[2].cursor = 1
+    app.draw()
+    text = screen.text()
+    assert "Shut down at runtime" in text, text
+    assert "How long the UPS keeps the output up" in text, text
+    # The explanation does not fit, and says so.
+    assert "…" in text, text
 
 
 def test_settings_enter_starts_an_edit_and_arrows_preview():

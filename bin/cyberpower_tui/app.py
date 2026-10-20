@@ -284,6 +284,10 @@ class SettingsTab(Tab):
 
     title = "Settings"
 
+    #: The longest explanation the tab will draw under the table. The table
+    #: gives up rows for it, so a long one costs a scroll, not the setting.
+    HELP_MAX_LINES = 6
+
     def __init__(self, app):
         super().__init__(app)
         self.editing = False
@@ -352,7 +356,10 @@ class SettingsTab(Tab):
         )
         W.put(screen, top, SETTINGS_ALLOWED_X, "Range", theme.muted | curses.A_BOLD)
 
-        first, stop = self.window(height - 3)
+        # The explanation of the selected setting sits under the table and
+        # takes the room it needs; the table keeps the rest and scrolls.
+        help_lines = self._help_lines(width, height)
+        first, stop = self.window(max(1, height - 3 - len(help_lines)))
         for index in range(first, stop):
             setting = settings[index]
             row = top + 2 + (index - first)
@@ -398,6 +405,49 @@ class SettingsTab(Tab):
                 )
                 W.put(screen, row, SETTINGS_ALLOWED_X, allowed, theme.muted)
             self.hits.append((row, index))
+
+        # The explanation follows the table it belongs to, one blank line
+        # below the last row.
+        self._draw_help(
+            screen,
+            theme,
+            top + 2 + (stop - first) + 1,
+            top + height - 1,
+            width,
+            help_lines,
+        )
+
+    # -- the explanation -------------------------------------------------
+    def _help_lines(self, width: int, height: int) -> list[str]:
+        """The selected setting's explanation, wrapped to the width."""
+        setting = self.current()
+        text = (setting or {}).get("help") or ""
+        if not text:
+            return []
+        # However short the tab is, the table keeps a few rows to walk
+        # through: an explanation is not worth losing the settings over.
+        budget = max(1, min(self.HELP_MAX_LINES, height - 6))
+        room = max(10, width - 2)
+        lines = W.wrap(text, room)
+        if len(lines) > budget:
+            lines = lines[:budget]
+            # The sentence goes on past the bottom: say so.
+            lines[-1] = W.clip(lines[-1] + "…", room)
+        return lines
+
+    def _draw_help(self, screen, theme, row, bottom, width, lines) -> None:
+        """Draw the explanation under the table, but never past the tab."""
+        if not lines:
+            return
+        room = bottom - row + 1
+        if room <= 0:
+            return
+        shown = list(lines[:room])
+        if len(shown) < len(lines):
+            # The rest of the sentence is off the bottom: say so.
+            shown[-1] = W.clip(shown[-1] + "…", width - 2)
+        for offset, line in enumerate(shown):
+            W.put(screen, row + offset, 1, W.clip(line, width - 2), theme.muted)
 
     # -- editing ---------------------------------------------------------
     def _guard(self, setting: dict) -> bool:

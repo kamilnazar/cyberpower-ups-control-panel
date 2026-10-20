@@ -30,6 +30,32 @@ def pad(text: str, width: int) -> str:
     return text + " " * (width - len(text))
 
 
+def wrap(text: str, width: int) -> list[str]:
+    """Break text into lines of at most `width` cells, on word boundaries.
+
+    A word longer than the width is cut rather than allowed to run over.
+    """
+    if width <= 0:
+        return []
+    lines: list[str] = []
+    for paragraph in str(text).split("\n"):
+        words = paragraph.split()
+        if not words:
+            lines.append("")
+            continue
+        line = ""
+        for word in words:
+            candidate = word if not line else f"{line} {word}"
+            if len(candidate) <= width:
+                line = candidate
+                continue
+            if line:
+                lines.append(line)
+            line = word if len(word) <= width else word[:width]
+        lines.append(line)
+    return lines
+
+
 # --------------------------------------------------------------- primitives
 
 

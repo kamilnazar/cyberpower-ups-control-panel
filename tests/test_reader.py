@@ -379,6 +379,23 @@ def test_config_and_set():
             raise AssertionError(f"{key}={value} should have been rejected")
 
 
+def test_every_setting_carries_an_explanation():
+    """The panel explains each setting, so the reader has to publish one."""
+    for key, _, _, _, _ in ups.CONFIG_SPECS:
+        assert ups.SETTING_HELP.get(key), key
+
+    reports = {
+        0x20: bytes([2]) + (170).to_bytes(2, "little") + (290).to_bytes(2, "little"),
+        0x21: bytes([30]) + bytes([10]),
+    }
+    device = fake_device(reports)
+    settings = ups.read_config(device)["settings"]
+    assert settings, "the fixture should publish some settings"
+    for entry in settings:
+        assert entry["help"], entry
+        assert entry["help"] == ups.SETTING_HELP[entry["key"]], entry
+
+
 def test_set_off_sentinel():
     """The delay fields' "off" sentinel round-trips through set_setting.
 

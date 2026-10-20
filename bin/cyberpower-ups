@@ -1318,6 +1318,51 @@ CONFIG_SPECS = (
     ("delayStartup", "Delay before startup", "s", (U_DELAY_BEFORE_STARTUP,), None),
 )
 
+#: What each setting does, in a sentence or two of plain prose. The panel
+#: shows this under the selected row, and `config` publishes it, so that every
+#: client explains a setting the same way instead of each making one up.
+SETTING_HELP = {
+    "alarm": (
+        "Whether the UPS beeps when the mains fails or the battery runs low. "
+        "'disabled' turns the alarm off; 'muted' silences it for now and keeps "
+        "the setting itself on."
+    ),
+    "warningLimit": (
+        "The battery charge at which the UPS says the battery is low. It only "
+        "warns: the output keeps running until one of the two limits below is "
+        "reached."
+    ),
+    "capacityLimit": (
+        "The battery charge at which the UPS cuts its output. Keep it above the "
+        "runtime limit, so a long outage still ends with a clean shutdown while "
+        "the battery has something left in it."
+    ),
+    "runtimeLimit": (
+        "How long the UPS keeps the output up after the mains fails. It counts "
+        "from the moment the mains goes, not from the charge: on this unit "
+        "300 s cut the power five minutes into an outage, at 58% charge, with "
+        "22 minutes of estimated runtime still showing. Raise it to give the "
+        "machine time to shut down, and let the capacity limit do the deep cut."
+    ),
+    "lowVoltageTransfer": (
+        "The input voltage below which the UPS switches to the battery. A lower "
+        "value rides through deeper sags before handing over; a higher one hands "
+        "over sooner and keeps a brown-out off the load."
+    ),
+    "highVoltageTransfer": (
+        "The input voltage above which the UPS switches to the battery, to keep "
+        "a surge off the load. Usually a little under the nominal 230 V."
+    ),
+    "delayShutdown": (
+        "How long the UPS waits after it has decided to shut down before it cuts "
+        "the output: the window the machine has to shut itself down cleanly."
+    ),
+    "delayStartup": (
+        "How long the UPS waits after the mains comes back before it reconnects "
+        "the output: the window the machine has to come up first."
+    ),
+}
+
 
 def read_config(device: "UpsDevice | None" = None) -> dict:
     """The UPS's tunable settings, as published by its feature reports.
@@ -1376,6 +1421,8 @@ def read_config(device: "UpsDevice | None" = None) -> dict:
             # A negative logical minimum is the "off" sentinel; tell callers
             # whether they may write it back (see set_setting).
             "offAllowed": field.log_min < 0,
+            # What this setting does, for a panel that wants to explain it.
+            "help": SETTING_HELP.get(key, ""),
         }
         if choices is not None:
             entry["choices"] = {str(number): name for number, name in choices.items()}

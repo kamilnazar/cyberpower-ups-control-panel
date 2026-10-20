@@ -195,14 +195,21 @@ lands on **History** rather than being swallowed by the table. Starting an edit
 and applying it is exactly one USB write, however many arrow presses it took to
 get there. Only the settings your model publishes and marks writable appear:
 
-| Setting | HID usage | Typical range |
-| ------- | --------- | ------------- |
-| Audible alarm | `AudibleAlarmControl` `0x5A` | disabled / enabled / muted |
-| Low-battery warning at | `WarningCapacityLimit` `0x8C` | 0–100 % |
-| Shut down at capacity | `RemainingCapacityLimit` `0x29` | 0–100 % |
-| Shut down at runtime | `RemainingTimeLimit` `0x2A` | 0–600 s |
-| Low / high voltage transfer | `LowVoltageTransfer` `0x53` / `0x54` | 167–175 / 287–295 V |
-| Delay before shutdown / startup | `DelayBeforeShutdown` `0x57` / `0x56` | off, or seconds |
+| Setting | HID usage | Typical range | What it does |
+| ------- | --------- | ------------- | ------------ |
+| Audible alarm | `AudibleAlarmControl` `0x5A` | disabled / enabled / muted | beeps when the mains fails or the battery runs low |
+| Low-battery warning at | `WarningCapacityLimit` `0x8C` | 0–100 % | the charge at which the UPS says the battery is low — it only warns |
+| Shut down at capacity | `RemainingCapacityLimit` `0x29` | 0–100 % | the charge at which the UPS cuts its output |
+| Shut down at runtime | `RemainingTimeLimit` `0x2A` | 0–600 s | how long the output stays up after the mains fails |
+| Low voltage transfer | `LowVoltageTransfer` `0x53` | 167–175 V | the input voltage below which the UPS takes over |
+| High voltage transfer | `HighVoltageTransfer` `0x54` | 287–295 V | the input voltage above which the UPS takes over |
+| Delay before shutdown | `DelayBeforeShutdown` `0x57` | off, or seconds | the window the machine has to shut down cleanly |
+| Delay before startup | `DelayBeforeStartup` `0x56` | off, or seconds | the window the machine has to come up first |
+
+The panel explains the setting under the cursor as you move through the table,
+so you do not have to leave it to find out what a row does. The same words come
+from the reader: `config` publishes a `help` field with every setting, so any
+other client can explain them the same way instead of each making one up.
 
 Settings are read back in physical units (so a descriptor that declares the
 delays as logical minutes against physical seconds still reads in seconds), and
