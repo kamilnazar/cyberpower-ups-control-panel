@@ -4,7 +4,8 @@ An Omarchy (Quickshell) bar widget showing the status of a CyberPower USB UPS:
 charge, estimated runtime, load, mains voltage and the current power state. Left
 click opens a detail card with a self-test and an alarm-mute button; the **gear**
 in the card's header opens a full-screen TUI with the rest of the UPS's controls
-(alarm mode, low-battery thresholds, transfer voltages, shutdown delays).
+(alarm mode, low-battery thresholds, transfer voltages, shutdown delays), the
+recorded history and an energy meter priced at your tariff.
 
 The interesting part is that it does not need CyberPower's PowerPanel suite. A
 CyberPower UPS is a standard USB HID *Power Device*, so the widget reads the
@@ -130,6 +131,7 @@ Two things do need Python and Omarchy:
 | `debug` | `false` | Append every device read and write to the debug trace. |
 | `shutdownAt` | `0` | Battery charge (percent) that calls for the machine to power itself off. `0` leaves the rule off. |
 | `shutdownAfterMin` | `0` | Minutes into an outage that call for the same. `0` leaves that half of the rule off. |
+| `shutdownRuntimeMin` | `0` | Remaining runtime (minutes) at or below which the machine powers itself off — the load-aware rule. `0` leaves that half of the rule off. |
 | `shutdownGraceSec` | `30` | How long the widget counts down before it powers the machine off. |
 
 `Simulate` shows fixed sample data and is the quickest way to try the widget
@@ -145,6 +147,20 @@ without a UPS attached. To try an outage, write the readings you want into
 > module by the shell (`BarModel.js`, `customModuleType`), and the bar then
 > loads the *value* as a QML file — `file://auto`, which is not there. The
 > widget then renders as nothing at all, with no error anywhere.
+
+The schema follows PowerPanel's own configuration layout, so the same words
+mean the same thing in both tools:
+
+| PowerPanel page | This plugin |
+| --------------- | ----------- |
+| **Serial Port** | `backend`, `upsName` — how the UPS is reached |
+| **Interface** | `showPercent`, `iconPreset`, `warnBattery`, `criticalBattery`, `showTestControls` |
+| **Runtime** | the `shutdown*` rules below, plus the UPS's own capacity/runtime limits and delays in the TUI |
+| **Voltage** | the UPS's low/high voltage transfer in the TUI |
+| **Notification** | the UPS's audible alarm in the TUI, and the widget's notifications |
+| **Energy Settings** | the tariff row in the TUI's **Energy** tab, or `./cyberpower-ups energy --cost-per-kwh …` |
+| **Self-Test** | the popup's self-test buttons and the reported last result |
+| **Advanced** | `debug`; PowerPanel's sensitivity presets are left to the transfer thresholds above, and scheduled/hibernation actions to systemd |
 
 This Omarchy build has no settings panel for bar widgets, so the values are
 set from the command line:
@@ -162,33 +178,38 @@ widget reads both spellings either way.
 
 The UPS can cut its output at any moment, and the machine then dies with the
 power still on. The widget can watch for that and shut the machine down
-cleanly instead. Two settings arm the rule, and either one is enough:
+cleanly instead. Three settings arm the rule, and any one is enough:
 
 ```sh
 omarchy bar set io.github.kamil.cyberpower-ups shutdownAt 30 --json
 omarchy bar set io.github.kamil.cyberpower-ups shutdownAfterMin 3 --json
+omarchy bar set io.github.kamil.cyberpower-ups shutdownRuntimeMin 5 --json
 ```
 
 The first calls for a shutdown when the battery reaches that charge, the
-second when the outage has lasted that long. Both are off by default
-(`0`), and the rule is decided by the reader, not by the widget:
+second when the outage has lasted that long, and the third when the UPS
+estimates only that much runtime is left. All are off by default (`0`), and
+the rule is decided by the reader, not by the widget:
 
 ```bash
-./cyberpower-ups shutdown --at 30 --after 3 --outage-start <unix timestamp>
+./cyberpower-ups shutdown --at 30 --after 3 --runtime 5 --outage-start <unix timestamp>
 ```
 
 which prints a verdict — `off`, `idle`, `armed` or `due` — and the reason
-behind it. The widget asks for that verdict only when the rule might be due,
-shows the reason in the popup, and counts down `shutdownGraceSec` before it
-powers the machine off. A notification says what is happening, the popup has a
+behind it. The runtime rule is the load-aware one: 30 % of a 200 W load is not
+the same number of minutes as 30 % of a 50 W load, and it is the same quantity
+the UPS's own `runtimeMin` (and PowerPanel's "remaining battery runtime") uses.
+The widget asks for the verdict only when the rule might be due, shows the
+reason in the popup, and counts down `shutdownGraceSec` before it powers the
+machine off. A notification says what is happening, the popup has a
 **Cancel shutdown** button, and the mains coming back cancels it by itself.
 The decision is written to the history, so the log says why the machine went
 down.
 
 Three things keep it from firing by accident: the rule is off unless it is
 armed, the outage has to be older than twenty seconds (a blink of the mains is
-not a reason to power off), and a reading without a charge is not read as a
-charge of zero.
+not a reason to power off), and a reading without a charge or a runtime is not
+read as zero.
 
 **Mind the UPS's own timer.** On some models — the CPS UT2200EG here — the
 UPS compares its *remaining runtime* against a limit of its own (300 s on this
@@ -214,7 +235,7 @@ from a bare terminal:
 ./bin/cyberpower-ups-tui --source hidraw  # force direct USB
 ```
 
-It is laid out like a small desktop app: a title bar, five tabs and a message
+It is laid out like a small desktop app: a title bar, six tabs and a message
 line.
 
 | Tab | What it shows |
@@ -223,11 +244,12 @@ line.
 | **Controls** | run a quick/deep battery test, abort one, mute the alarm |
 | **Settings** | every tunable setting the UPS publishes, edited in two steps |
 | **History** | the input voltage as a sparkline, then the events the recorder logged; follows the log live |
+| **Energy** | cumulative, today and last-7-days kWh from the recorded load, priced at the tariff (editable in the tab) |
 | **About** | where the readings come from, and the key help |
 
 | Key | Action |
 | --- | ------ |
-| `←` `→`, `Tab`, `1`–`5` | switch tab |
+| `←` `→`, `Tab`, `1`–`6` | switch tab |
 | `↑` `↓`, `j` `k` | move through actions, settings and events |
 | `Enter` | run an action, or start / apply a setting edit |
 | `←` `→`, `+` `-` | while editing a setting: pick the new value |
@@ -243,7 +265,10 @@ again to run it (or to start editing a setting).
 On **Settings**, editing is two steps. `Enter` starts editing the selected row
 and the arrows (or `+`/`-`) then preview a new value — the preview is shown
 underlined and nothing is written yet. `Enter` applies it, `Esc` (or moving to
-another row) throws it away. Because the arrows are free while you browse, they
+another row) throws it away. The table is sectioned the way PowerPanel lays
+its configuration out — **Notification**, **Runtime**, **Voltage** — and the
+headings are not rows, so the cursor still walks from one setting to the next.
+Because the arrows are free while you browse, they
 keep switching tabs here as they do on every other tab, so `→` from **Settings**
 lands on **History** rather than being swallowed by the table. Starting an edit
 and applying it is exactly one USB write, however many arrow presses it took to
@@ -321,6 +346,9 @@ directory:
 ./cyberpower-ups history                # the last 40 recorded lines
 ./cyberpower-ups history --events       # only the events
 ./cyberpower-ups history --since 120 --json
+./cyberpower-ups energy                 # kWh for the total, today and the week
+./cyberpower-ups energy --cost-per-kwh 0.75 --currency EUR   # price it
+./cyberpower-ups energy --json          # the same summary as one document
 ```
 
 `dump` and `probe` are the tools to reach for when a model misbehaves: they
@@ -392,6 +420,55 @@ events are still detected between runs).
 
 The file is append-only and capped: past 2 MB the oldest half is dropped, never
 the newest, so the recording keeps going without growing without bound.
+
+## Energy and cost
+
+PowerPanel keeps an energy meter — a cumulative and an average consumption in
+kWh, priced at what it calls *Cost per kWh*. The widget already records a load
+figure with every sample, so the same meter can be integrated from the history
+instead of needing a second recorder:
+
+```bash
+./cyberpower-ups energy
+# Total        2.204 kWh   208 W average   10.6 h measured   2436 min unrecorded
+# Today        0.386 kWh   209 W average   1.8 h measured
+# Last 7 days  2.204 kWh   208 W average   10.6 h measured   2436 min unrecorded
+# Tariff       not set (use --cost-per-kwh to price the energy)
+```
+
+`Total` covers every sample the history still holds, `Today` since local
+midnight and `Last 7 days` the rolling week. The energy is a trapezoid
+integration between consecutive samples, so it is the *measured* figure and
+not an estimate from the nominal load. A gap longer than five minutes is
+reported as unrecorded rather than bridged: the recorder was down, and a
+single reading spread over an hour of silence would invent energy.
+
+The tariff lives in `~/.local/state/cyberpower-ups/energy.json` and survives
+between runs; the currency defaults to the locale's.
+
+```bash
+./cyberpower-ups energy --cost-per-kwh 0.75 --currency EUR
+./cyberpower-ups energy --json | jq .today
+```
+
+The TUI's **Energy** tab shows the same three scopes and a **Cost per kWh**
+row: `Enter` (or `e`) opens the same editor the Settings tab uses, so the
+tariff no longer needs a shell command. The currency is still set with
+`--currency`, since it is a unit rather than a tariff. The tab re-reads the
+scopes when the recorder appends. Nothing is added to the sample file and nothing extra
+runs: with the recorder off there is simply no energy to report, which is
+honest about the coverage.
+
+### Why there is no battery-health percentage
+
+PowerPanel's *Battery Health Indicator* is an estimate, and on this UPS it
+cannot be measured: the UT2200EG exposes no `FullChargeCapacity`,
+`DesignCapacity`, `CycleCount` or `ManufactureDate` usage at all (see
+`./cyberpower-ups dump`), so any percentage would be invented. What the
+hardware does report is `BatteryNeedsReplacing`, which this reader already
+parses as `replaceBattery` and the widget already shows as "Battery needs
+replacing". A health number would need a baseline over many full discharges
+to the same load, which the history alone cannot supply.
 
 ### Why `--listen` exists
 
@@ -575,22 +652,24 @@ captured a few seconds earlier.
 
 - Control covers the battery test, the audible alarm and the UPS's own tunable
   settings (the TUI), all over HID feature reports. Monitoring is covered too:
-  the widget, the panel and the optional `watch` recorder. What is still out of
-  scope is the *automation* layer: automatic shutdown/hibernate on outage or low
-  battery, scheduled actions and PowerPanel's "energy saving" features. Those
-  are daemon/OS work, not device work — see below.
+  the widget, the panel, the optional `watch` recorder and the energy meter
+  derived from it. Automation covers the shutdown rules above (charge, outage
+  length and remaining runtime) and nothing more: scheduled actions,
+  hibernation windows and PowerPanel's "energy saving" schedules are OS work
+  this plugin deliberately leaves to systemd.
 - CyberPower UPSes report through usages the HID Power Device class defines.
   Non-conforming models fall back to `pwrstat` or NUT.
 
 ### If you want automatic shutdown
 
 The UPS itself only reports state; something has to act on it. This widget
-can: the `shutdownAt` and `shutdownAfterMin` settings above shut the machine
-down cleanly when the charge or the clock says so, and the decision is
-written to the history. NUT is the other way: run `usbhid-ups` against the
-UPS and let `upsmon` handle shutdowns, and point this widget's `backend` at
-`NUT` for display. The reader exposes the same values, so a small systemd unit
-could just as well read its JSON and act.
+can: the `shutdownAt`, `shutdownAfterMin` and `shutdownRuntimeMin` settings
+above shut the machine down cleanly when the charge, the clock or the
+remaining runtime says so, and the decision is written to the history. NUT is
+the other way: run `usbhid-ups` against the UPS and let `upsmon` handle
+shutdowns, and point this widget's `backend` at `NUT` for display. The reader
+exposes the same values, so a small systemd unit could just as well read its
+JSON and act.
 
 ## License
 

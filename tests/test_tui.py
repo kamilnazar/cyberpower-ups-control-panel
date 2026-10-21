@@ -95,6 +95,8 @@ class StubBackend:
         self.fail_sequence: dict[str, list] = {}
         self.sets = []
         self.actions = []
+        self._energy = None
+        self.energy_writes = []
 
     def status(self):
         return self._status
@@ -104,6 +106,16 @@ class StubBackend:
 
     def history(self, limit=400):
         return copy.deepcopy(self._history)
+
+    def energy(self):
+        return copy.deepcopy(self._energy)
+
+    def set_energy(self, cost):
+        self.energy_writes.append(cost)
+        summary = copy.deepcopy(self._energy) or {"currency": "PLN"}
+        summary["costPerKwh"] = cost
+        self._energy = summary
+        return copy.deepcopy(summary)
 
     def set_value(self, key, value):
         self.sets.append((key, value))
@@ -171,6 +183,7 @@ SETTINGS = [
     {
         "key": "alarm",
         "label": "Audible alarm",
+        "group": "Notification",
         "value": 2,
         "valueLabel": "enabled",
         "choices": {"1": "disabled", "2": "enabled", "3": "muted"},
@@ -184,6 +197,7 @@ SETTINGS = [
     {
         "key": "runtimeLimit",
         "label": "Shut down at runtime",
+        "group": "Runtime",
         "value": 300,
         "unit": "s",
         "min": 0,
@@ -201,6 +215,7 @@ SETTINGS = [
     {
         "key": "delayShutdown",
         "label": "Delay before shutdown",
+        "group": "Runtime",
         "value": None,
         "unit": "s",
         "min": 0,
@@ -733,6 +748,18 @@ def test_settings_tab_renders():
     assert "off · 0 – 1,966,020 s" in text, text
 
 
+def test_settings_tab_groups_the_settings_like_powerpanel():
+    """The table is sectioned by PowerPanel's configuration pages."""
+    screen, app, _ = _app()
+    app.tab_index = 2
+    app.draw()
+    text = screen.text()
+    assert "Notification" in text, text
+    assert "Runtime" in text, text
+    # A heading is not a row: the cursor still walks only the settings.
+    assert app.tabs[2].count() == len(SETTINGS), app.tabs[2].count()
+
+
 def test_settings_tab_explains_the_selected_setting():
     """The row under the cursor says what the setting does."""
     screen, app, _ = _app()
@@ -1189,13 +1216,68 @@ def test_settings_e_opens_the_editor_and_enter_starts_one():
 
 def test_about_tab_renders():
     screen, app, _ = _app()
-    app.tab_index = 4
+    app.tab_index = next(
+        index for index, tab in enumerate(app.tabs) if tab.title == "About"
+    )
     app.draw()
     text = screen.text()
     assert "CyberPower UPS control panel" in text, text
     assert "/stub/reader" in text, text
     assert "switch tab" in text, text
     assert "history.jsonl" in text, text
+
+
+def test_energy_tab_renders_the_kwh_and_the_cost():
+    screen, app, _ = _app()
+    app.tab_index = next(
+        index for index, tab in enumerate(app.tabs) if tab.title == "Energy"
+    )
+    scope = {
+        "samples": 10,
+        "energyKwh": 1.234,
+        "cost": 0.93,
+        "averageWatts": 200.0,
+        "coveredSeconds": 22224.0,
+        "missingSeconds": 600.0,
+    }
+    app.energy = {
+        "costPerKwh": 0.75,
+        "currency": "PLN",
+        "maxGapSeconds": 300,
+        "total": scope,
+        "today": dict(scope, energyKwh=0.5, cost=0.38),
+        "week": scope,
+    }
+    app.draw()
+    text = screen.text()
+    assert "1.234 kWh" in text, text
+    assert "0.93 PLN" in text, text
+    assert "Cost per kWh" in text, text
+    assert "0.75 PLN" in text, text
+    assert "10 min unrecorded" in text, text
+
+
+def test_energy_tab_edits_the_tariff():
+    """The tariff is a setting here, the way PowerPanel's Energy Settings is."""
+    screen, app, backend = _app()
+    app.tab_index = next(
+        index for index, tab in enumerate(app.tabs) if tab.title == "Energy"
+    )
+    app.energy = {"costPerKwh": 0.75, "currency": "PLN"}
+    app.draw()
+
+    app.handle("\n")
+    assert isinstance(app.dialog, EditDialog), app.dialog
+    assert app.dialog.buffer == "0.75", app.dialog.buffer
+    app.dialog.buffer = "0.5"
+    app.dialog.cursor = len(app.dialog.buffer)
+    app.dialog.key(app, "\n")
+    app._drain()
+    app.draw()
+
+    assert backend.energy_writes == [0.5], backend.energy_writes
+    assert app.energy["costPerKwh"] == 0.5, app.energy
+    assert "tariff saved" in app.message, app.message
 
 
 def test_sparkline():

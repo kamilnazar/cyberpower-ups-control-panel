@@ -34,6 +34,7 @@ import argparse
 import fcntl
 import glob
 import json
+import locale
 import os
 import re
 import select
@@ -1300,6 +1301,8 @@ CONFIG_SPECS = (
         None,
     ),
     ("runtimeLimit", "Shut down at runtime", "s", (U_REMAINING_TIME_LIMIT,), None),
+    ("delayShutdown", "Delay before shutdown", "s", (U_DELAY_BEFORE_SHUTDOWN,), None),
+    ("delayStartup", "Delay before startup", "s", (U_DELAY_BEFORE_STARTUP,), None),
     (
         "lowVoltageTransfer",
         "Low voltage transfer",
@@ -1314,9 +1317,23 @@ CONFIG_SPECS = (
         (U_HIGH_VOLTAGE_TRANSFER,),
         None,
     ),
-    ("delayShutdown", "Delay before shutdown", "s", (U_DELAY_BEFORE_SHUTDOWN,), None),
-    ("delayStartup", "Delay before startup", "s", (U_DELAY_BEFORE_STARTUP,), None),
 )
+
+#: Which configuration page a setting belongs on, using PowerPanel's own page
+#: names (Notification, Runtime, Voltage) so a client can lay the settings out
+#: the way the official tool does instead of as one flat list. Settings the
+#: official tool files elsewhere -- the serial port, the energy tariff -- are
+#: application settings here and do not live on the ups (see `energy`).
+SETTING_GROUP = {
+    "alarm": "Notification",
+    "warningLimit": "Runtime",
+    "capacityLimit": "Runtime",
+    "runtimeLimit": "Runtime",
+    "delayShutdown": "Runtime",
+    "delayStartup": "Runtime",
+    "lowVoltageTransfer": "Voltage",
+    "highVoltageTransfer": "Voltage",
+}
 
 #: What each setting does, in a sentence or two of plain prose. The panel
 #: shows this under the selected row, and `config` publishes it, so that every
@@ -1325,36 +1342,41 @@ SETTING_HELP = {
     "alarm": (
         "Whether the UPS beeps when the mains fails or the battery runs low. "
         "'disabled' turns the alarm off; 'muted' silences it for now and keeps "
-        "the setting itself on."
+        "the setting itself on. PowerPanel files it under Notification, "
+        "as 'UPS Alarms'."
     ),
     "warningLimit": (
-        "The battery charge at which the UPS says the battery is low. It only "
-        "warns: the output keeps running until one of the two limits below is "
-        "reached."
+        "The battery charge at which the UPS warns that the battery is low. "
+        "It only warns: the output keeps running until one of the limits "
+        "below is reached."
     ),
     "capacityLimit": (
-        "The battery charge at which the UPS cuts its output. Keep it above the "
-        "runtime limit, so a long outage still ends with a clean shutdown while "
-        "the battery has something left in it."
+        "The battery charge at which the UPS cuts its output -- PowerPanel's "
+        "Consume Battery Capacity. Keep it above the runtime limit, so a long "
+        "outage still ends with a clean shutdown while the battery has "
+        "something left in it."
     ),
     "runtimeLimit": (
-        "The UPS compares this with its own estimate of the runtime it has "
-        "left and cuts the output once the estimate falls below it. That "
-        "estimate is much lower than the runtime the unit reports: 32-38 min "
-        "reported against roughly 12 min of real time at 220 W, so 300 s means "
-        "'shut down with about five minutes of real runtime left' -- in the "
-        "last outage that was 58% charge. The firmware refuses anything below "
-        "300 s, and a limit above the unit's real runtime makes it drop the "
-        "output while it is still on mains."
+        "The UPS compares this with its own estimate of the remaining battery "
+        "runtime and cuts the output once the estimate falls below it -- the "
+        "same 'remaining battery runtime' PowerPanel's Runtime page shows. "
+        "That estimate is much lower than the runtime the unit "
+        "reports: 32-38 min reported against roughly 12 min of real time at "
+        "220 W, so 300 s means 'shut down with about five minutes of real "
+        "runtime left' -- in the last outage that was 58% charge. The firmware "
+        "refuses anything below 300 s, and a limit above the unit's real "
+        "runtime makes it drop the output while it is still on mains."
     ),
     "lowVoltageTransfer": (
-        "The input voltage below which the UPS switches to the battery. A lower "
-        "value rides through deeper sags before handing over; a higher one hands "
-        "over sooner and keeps a brown-out off the load."
+        "The input voltage below which the UPS switches to the battery -- the "
+        "lower half of PowerPanel's Voltage page. A lower value rides through "
+        "deeper sags before handing over; a higher one hands over sooner and "
+        "keeps a brown-out off the load."
     ),
     "highVoltageTransfer": (
         "The input voltage above which the UPS switches to the battery, to keep "
-        "a surge off the load. Usually a little under the nominal 230 V."
+        "a surge off the load -- the upper half of PowerPanel's Voltage page. "
+        "Usually a little under the nominal 230 V."
     ),
     "delayShutdown": (
         "How long the UPS waits after it has decided to shut down before it cuts "
@@ -1415,6 +1437,7 @@ def read_config(device: "UpsDevice | None" = None) -> dict:
         entry = {
             "key": key,
             "label": label,
+            "group": SETTING_GROUP.get(key, ""),
             "unit": unit,
             "value": None if (value is None or sentinel) else round(value),
             "min": round(low),
@@ -1688,24 +1711,28 @@ def shutdown_verdict(
     status: dict | None,
     at: int = 0,
     after_min: int = 0,
+    runtime_min: int = 0,
     outage_started: float | None = None,
     now: float | None = None,
 ) -> dict:
     """Should the machine shut itself down? A pure function, no I/O.
 
-    ``at`` is the battery charge (in percent) that calls for a shutdown and
-    ``after_min`` the number of minutes into an outage; either one is enough
-    on its own, and zero switches that half of the rule off. ``outage_started``
-    is when the UPS was first seen on battery. The verdict is a small
-    document: ``state`` is one of ``off`` (no rule), ``idle`` (the mains is
-    up), ``armed`` (the rule is waiting) or ``due`` (shut down now).
+    ``at`` is the battery charge (in percent) that calls for a shutdown,
+    ``after_min`` the number of minutes into an outage and ``runtime_min`` the
+    remaining runtime (in minutes) at or below which the machine should go
+    down; any one is enough on its own, and zero switches that half of the
+    rule off. ``outage_started`` is when the UPS was first seen on battery.
+    The verdict is a small document: ``state`` is one of ``off`` (no rule),
+    ``idle`` (the mains is up), ``armed`` (the rule is waiting) or ``due``
+    (shut down now).
     """
     now = time.time() if now is None else now
     verdict = {
-        "armed": bool(at or after_min),
+        "armed": bool(at or after_min or runtime_min),
         "state": "off",
         "onBattery": False,
         "charge": None,
+        "runtimeMinutes": None,
         "outageSeconds": 0,
         "reason": "",
     }
@@ -1720,6 +1747,8 @@ def shutdown_verdict(
     verdict["onBattery"] = True
     charge = status.get("battery")
     verdict["charge"] = charge if isinstance(charge, (int, float)) else None
+    runtime = status.get("runtimeMin")
+    verdict["runtimeMinutes"] = runtime if isinstance(runtime, (int, float)) else None
     started = outage_started if outage_started is not None else now
     elapsed = max(0.0, now - started)
     verdict["outageSeconds"] = int(elapsed)
@@ -1737,6 +1766,15 @@ def shutdown_verdict(
     if after_min and elapsed >= after_min * 60:
         reasons.append(
             f"the outage has lasted {elapsed / 60:.1f} min (limit {after_min} min)"
+        )
+    if (
+        runtime_min
+        and verdict["runtimeMinutes"] is not None
+        and verdict["runtimeMinutes"] <= runtime_min
+    ):
+        reasons.append(
+            f"only {verdict['runtimeMinutes']:g} min of runtime remain "
+            f"(limit {runtime_min} min)"
         )
     if reasons:
         verdict["state"] = "due"
@@ -1830,6 +1868,170 @@ def sample_record(data: dict) -> dict:
     record["t"] = int(data.get("updated") or time.time())
     record["kind"] = "sample"
     return record
+
+
+# --------------------------------------------------------------------------
+# Energy and cost, derived from the recorded samples
+# --------------------------------------------------------------------------
+#
+# PowerPanel keeps an energy meter: a cumulative and an average consumption in
+# kWh, priced at a cost per kWh that it calls the energy tariff. We already
+# record one sample per tick carrying loadWatts, so the meter here is a
+# trapezoid integration over those samples -- no second recorder, and the
+# figure covers exactly the period the recorder was running. A gap longer than
+# ENERGY_MAX_GAP is not integrated: the recorder was down, and spreading one
+# reading across an hour of silence would invent energy.
+
+ENERGY_NAME = "energy.json"
+
+#: Longest gap between samples that still counts as measured time.
+ENERGY_MAX_GAP = 300.0
+
+
+def energy_path() -> str:
+    return os.path.join(state_dir(), ENERGY_NAME)
+
+
+def default_currency() -> str:
+    """The locale's currency code, so the cost reads naturally out of the box."""
+    try:
+        code = locale.localeconv().get("int_curr_symbol", "").strip()
+    except (ValueError, TypeError):
+        code = ""
+    return code or "USD"
+
+
+def read_energy_settings() -> dict:
+    """The tariff and currency, with the locale's currency as the default."""
+    settings = {"costPerKwh": 0.0, "currency": default_currency()}
+    try:
+        with open(energy_path(), encoding="utf-8") as handle:
+            stored = json.load(handle)
+    except (OSError, ValueError):
+        return settings
+    if isinstance(stored, dict):
+        cost = stored.get("costPerKwh")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
+            settings["costPerKwh"] = float(cost)
+        currency = stored.get("currency")
+        if isinstance(currency, str) and currency.strip():
+            settings["currency"] = currency.strip()
+    return settings
+
+
+def write_energy_settings(settings: dict) -> None:
+    try:
+        os.makedirs(state_dir(), exist_ok=True)
+        with open(energy_path(), "w", encoding="utf-8") as handle:
+            json.dump(settings, handle, indent=2)
+            handle.write("\n")
+    except OSError as error:
+        DIAG.debug(f"cannot store the energy settings: {error}")
+
+
+def _energy_scope(
+    samples: list[tuple[float, float]], cost_per_kwh: float, max_gap: float
+) -> dict:
+    scope = {
+        "samples": len(samples),
+        "energyKwh": 0.0,
+        "cost": 0.0,
+        "averageWatts": None,
+        "coveredSeconds": 0.0,
+        "missingSeconds": 0.0,
+        "from": samples[0][0] if samples else None,
+        "to": samples[-1][0] if samples else None,
+    }
+    if len(samples) < 2:
+        return scope
+
+    watt_hours = 0.0
+    covered = 0.0
+    missing = 0.0
+    for (t0, w0), (t1, w1) in zip(samples, samples[1:]):
+        seconds = t1 - t0
+        if seconds <= 0:
+            continue
+        if seconds > max_gap:
+            missing += seconds
+            continue
+        watt_hours += (w0 + w1) / 2.0 * seconds / 3600.0
+        covered += seconds
+
+    scope["energyKwh"] = round(watt_hours / 1000.0, 4)
+    scope["cost"] = round(scope["energyKwh"] * cost_per_kwh, 2)
+    scope["coveredSeconds"] = round(covered, 1)
+    scope["missingSeconds"] = round(missing, 1)
+    if covered > 0:
+        scope["averageWatts"] = round(watt_hours / covered * 3600.0, 1)
+    return scope
+
+
+def energy_summary(
+    records: list[dict],
+    cost_per_kwh: float = 0.0,
+    now: float | None = None,
+    max_gap: float = ENERGY_MAX_GAP,
+) -> dict:
+    """Integrate the recorded load into energy, for the total, today and week.
+
+    ``total`` covers every sample the history still holds, ``today`` since
+    local midnight and ``week`` the rolling last seven days. The three scopes
+    are independent integrations, so a gap in one does not skew another.
+    """
+    now = time.time() if now is None else now
+    samples = []
+    for record in records:
+        if record.get("kind") != "sample":
+            continue
+        at = record.get("t")
+        watts = record.get("loadWatts")
+        if isinstance(at, bool) or not isinstance(at, (int, float)):
+            continue
+        if isinstance(watts, bool) or not isinstance(watts, (int, float)):
+            continue
+        samples.append((float(at), float(watts)))
+    samples.sort()
+
+    midnight = time.mktime(time.localtime(now)[:3] + (0, 0, 0, 0, 0, -1))
+    week_start = now - 7 * 86400
+    today = [sample for sample in samples if sample[0] >= midnight]
+    week = [sample for sample in samples if sample[0] >= week_start]
+
+    return {
+        "costPerKwh": round(cost_per_kwh, 4),
+        "maxGapSeconds": max_gap,
+        "total": _energy_scope(samples, cost_per_kwh, max_gap),
+        "today": _energy_scope(today, cost_per_kwh, max_gap),
+        "week": _energy_scope(week, cost_per_kwh, max_gap),
+    }
+
+
+def _energy_line(scope: dict, currency: str, cost_per_kwh: float) -> str:
+    if not scope.get("samples"):
+        return "nothing recorded"
+    parts = [f"{scope['energyKwh']:.3f} kWh"]
+    if cost_per_kwh > 0:
+        parts.append(f"{scope['cost']:.2f} {currency}".strip())
+    if scope.get("averageWatts") is not None:
+        parts.append(f"{scope['averageWatts']:.0f} W average")
+    hours = scope["coveredSeconds"] / 3600.0
+    parts.append(f"{hours:.1f} h measured")
+    if scope["missingSeconds"] > 0:
+        parts.append(f"{scope['missingSeconds'] / 60.0:.0f} min unrecorded")
+    return "   ".join(parts)
+
+
+def print_energy(summary: dict) -> None:
+    currency = summary.get("currency") or ""
+    tariff = summary.get("costPerKwh") or 0.0
+    for label, key in (("Total", "total"), ("Today", "today"), ("Last 7 days", "week")):
+        print(f"{label:12} {_energy_line(summary[key], currency, tariff)}")
+    if tariff > 0:
+        print(f"Tariff       {tariff:g} {currency} per kWh".rstrip())
+    else:
+        print("Tariff       not set (use --cost-per-kwh to price the energy)")
+
 
 
 def _event(name: str, text: str, level: str, at: int) -> dict:
@@ -2237,6 +2439,7 @@ def main(argv=None) -> int:
             "probe",
             "watch",
             "history",
+            "energy",
             "shutdown",
         ],
     )
@@ -2286,7 +2489,21 @@ def main(argv=None) -> int:
         "--events", action="store_true", help="history: events only, no samples"
     )
     parser.add_argument(
-        "--json", action="store_true", help="history: raw JSON lines instead of a table"
+        "--json",
+        action="store_true",
+        help="history: raw JSON lines instead of a table; energy: the summary "
+        "as one JSON document",
+    )
+    parser.add_argument(
+        "--cost-per-kwh",
+        type=float,
+        default=None,
+        help="energy: tariff per kWh, stored for later runs (0 prices nothing)",
+    )
+    parser.add_argument(
+        "--currency",
+        default=None,
+        help="energy: currency code or symbol shown beside the cost",
     )
     parser.add_argument(
         "--at",
@@ -2301,6 +2518,13 @@ def main(argv=None) -> int:
         default=0,
         help="shutdown: minutes into an outage that call for a shutdown, 0 to "
         "leave that half of the rule off",
+    )
+    parser.add_argument(
+        "--runtime",
+        type=int,
+        default=0,
+        help="shutdown: remaining runtime (minutes) at or below which the "
+        "machine should go down, 0 to leave that half of the rule off",
     )
     parser.add_argument(
         "--outage-start",
@@ -2339,6 +2563,28 @@ def main(argv=None) -> int:
             print_history(records, args.json)
             return 0
 
+        if args.action == "energy":
+            settings = read_energy_settings()
+            if args.cost_per_kwh is not None:
+                if args.cost_per_kwh < 0:
+                    print("the cost per kWh cannot be negative", file=sys.stderr)
+                    return 2
+                settings["costPerKwh"] = float(args.cost_per_kwh)
+                write_energy_settings(settings)
+            if args.currency is not None:
+                if not args.currency.strip():
+                    print("the currency cannot be empty", file=sys.stderr)
+                    return 2
+                settings["currency"] = args.currency.strip()
+                write_energy_settings(settings)
+            summary = energy_summary(read_history(), settings["costPerKwh"])
+            summary["currency"] = settings["currency"]
+            if args.json:
+                print(json.dumps(summary, indent=2 if args.pretty else None))
+            else:
+                print_energy(summary)
+            return 0
+
         if args.action == "config":
             if args.source == "simulate":
                 raise NoDevice("the simulate source cannot be configured")
@@ -2354,7 +2600,7 @@ def main(argv=None) -> int:
                 print(
                     json.dumps(
                         {
-                            "armed": bool(args.at or args.after),
+                            "armed": bool(args.at or args.after or args.runtime),
                             "state": "idle",
                             "reason": str(error),
                         }
@@ -2365,6 +2611,7 @@ def main(argv=None) -> int:
                 status,
                 at=args.at,
                 after_min=args.after,
+                runtime_min=args.runtime,
                 outage_started=args.outage_start,
             )
             if args.log and verdict["state"] == "due":

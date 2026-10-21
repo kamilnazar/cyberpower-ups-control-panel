@@ -352,9 +352,13 @@ def test_config_and_set():
     }
     assert settings["warningLimit"]["value"] == 30
     assert settings["capacityLimit"]["value"] == 10
+    # Each setting names the PowerPanel configuration page it belongs on.
+    assert settings["alarm"]["group"] == "Notification"
+    assert settings["capacityLimit"]["group"] == "Runtime"
 
     low = settings["lowVoltageTransfer"]
     assert (low["value"], low["min"], low["max"]) == (170, 167, 175), low
+    assert low["group"] == "Voltage"
     assert low["writable"] is True
     assert settings["warningLimit"]["offAllowed"] is False
     assert settings["alarm"]["offAllowed"] is False
@@ -383,6 +387,7 @@ def test_every_setting_carries_an_explanation():
     """The panel explains each setting, so the reader has to publish one."""
     for key, _, _, _, _ in ups.CONFIG_SPECS:
         assert ups.SETTING_HELP.get(key), key
+        assert ups.SETTING_GROUP.get(key), key
 
     reports = {
         0x20: bytes([2]) + (170).to_bytes(2, "little") + (290).to_bytes(2, "little"),
@@ -940,6 +945,96 @@ def test_a_missing_charge_does_not_call_for_a_shutdown():
         {"onBattery": True, "battery": None}, at=80, outage_started=1000, now=1300
     )
     assert verdict["state"] == "armed", verdict
+
+
+def test_the_shutdown_rule_fires_on_the_remaining_runtime():
+    """The load-aware rule: shut down when the runtime estimate gets short."""
+    verdict = ups.shutdown_verdict(
+        _on_battery(charge=60), runtime_min=40, outage_started=1000, now=1300
+    )
+    # _on_battery reports 20 min of runtime, under the 40 min limit.
+    assert verdict["state"] == "due", verdict
+    assert "20" in verdict["reason"] and "40" in verdict["reason"], verdict
+    assert verdict["runtimeMinutes"] == 20, verdict
+
+
+def test_a_long_runtime_keeps_the_rule_armed():
+    verdict = ups.shutdown_verdict(
+        _on_battery(charge=90), runtime_min=10, outage_started=1000, now=1300
+    )
+    assert verdict["state"] == "armed", verdict
+    assert verdict["runtimeMinutes"] == 20, verdict
+
+
+def test_a_missing_runtime_does_not_call_for_a_shutdown():
+    """A reading without a runtime estimate must not be read as zero minutes."""
+    verdict = ups.shutdown_verdict(
+        {"onBattery": True, "battery": 90, "runtimeMin": None},
+        runtime_min=10,
+        outage_started=1000,
+        now=1300,
+    )
+    assert verdict["state"] == "armed", verdict
+    assert verdict["runtimeMinutes"] is None, verdict
+
+
+def test_the_runtime_half_alone_is_not_armed_at_zero():
+    verdict = ups.shutdown_verdict(_on_battery(charge=5), runtime_min=0)
+    assert verdict["armed"] is False, verdict
+    assert verdict["state"] == "off", verdict
+
+
+def test_energy_is_integrated_from_the_load_samples():
+    records = [
+        {"t": 1000, "kind": "sample", "loadWatts": 100},
+        {"t": 1060, "kind": "sample", "loadWatts": 100},
+        {"t": 1120, "kind": "sample", "loadWatts": 100},
+        {"t": 1120, "kind": "event", "event": "onBattery", "text": "x"},
+    ]
+    summary = ups.energy_summary(records, cost_per_kwh=3.0, now=1200)
+    total = summary["total"]
+    # 100 W for 120 s = 3.33 Wh.
+    assert round(total["energyKwh"], 4) == round(100 * 120 / 3600 / 1000, 4), total
+    assert total["samples"] == 3, total
+    assert total["averageWatts"] == 100, total
+    assert total["cost"] == round(total["energyKwh"] * 3.0, 2), total
+
+
+def test_energy_does_not_bridge_a_recorder_gap():
+    """A silence longer than the gap bound is missing data, not one reading."""
+    records = [
+        {"t": 1000, "kind": "sample", "loadWatts": 100},
+        {"t": 2000, "kind": "sample", "loadWatts": 100},
+    ]
+    total = ups.energy_summary(records, now=2100)["total"]
+    assert total["energyKwh"] == 0.0, total
+    assert total["missingSeconds"] == 1000, total
+    assert total["averageWatts"] is None, total
+
+
+def test_energy_ignores_samples_without_a_load():
+    records = [
+        {"t": 1000, "kind": "sample", "loadWatts": None},
+        {"t": 1060, "kind": "sample", "loadWatts": 50},
+        {"t": 1120, "kind": "sample"},
+    ]
+    total = ups.energy_summary(records, now=1200)["total"]
+    assert total["samples"] == 1, total
+    assert total["energyKwh"] == 0.0, total
+
+
+def test_energy_scopes_start_at_local_midnight():
+    now = time.time()
+    midnight = time.mktime(time.localtime(now)[:3] + (0, 0, 0, 0, 0, -1))
+    records = [
+        {"t": midnight - 3600, "kind": "sample", "loadWatts": 100},
+        {"t": midnight + 60, "kind": "sample", "loadWatts": 100},
+        {"t": midnight + 120, "kind": "sample", "loadWatts": 100},
+    ]
+    summary = ups.energy_summary(records, now=midnight + 180)
+    assert summary["today"]["samples"] == 2, summary["today"]
+    assert summary["total"]["samples"] == 3, summary["total"]
+    assert summary["today"]["energyKwh"] > 0, summary["today"]
 
 
 def main():

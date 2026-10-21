@@ -61,12 +61,14 @@ BarWidget {
   readonly property bool showTestControls: root.boolSetting("showTestControls", true)
   readonly property bool debug: root.boolSetting("debug", false)
 
-  // The shutdown rule: the battery charge (in percent) and the number of
-  // minutes into an outage that call for the machine to power itself off.
-  // Zero switches that half of the rule off, and both being zero leaves the
-  // whole rule off -- which is how it ships.
+  // The shutdown rule: the battery charge (in percent), the number of
+  // minutes into an outage and the remaining runtime (in minutes) that call
+  // for the machine to power itself off. Zero switches that half of the rule
+  // off, and all of them being zero leaves the whole rule off -- which is
+  // how it ships.
   readonly property int shutdownAt: Math.max(0, root.numberSetting("shutdownAt", 0))
   readonly property int shutdownAfterMin: Math.max(0, root.numberSetting("shutdownAfterMin", 0))
+  readonly property int shutdownRuntimeMin: Math.max(0, root.numberSetting("shutdownRuntimeMin", 0))
   readonly property int shutdownGraceSec: Math.max(5, root.numberSetting("shutdownGraceSec", 30))
 
   readonly property bool present: root.status !== null && root.status.battery !== undefined
@@ -146,7 +148,7 @@ BarWidget {
     if (root.status.loadPercent !== null && root.status.loadPercent !== undefined)
       parts.push(root.status.loadPercent + "% load")
     if (root.shutdownCountdown >= 0) parts.push("shutting down in " + root.shutdownCountdown + " s")
-    else if (root.shutdownAt > 0 || root.shutdownAfterMin > 0)
+    else if (root.shutdownAt > 0 || root.shutdownAfterMin > 0 || root.shutdownRuntimeMin > 0)
       parts.push("shutdown " + root.shutdownLabel)
     return parts.join("  ·  ")
   }
@@ -228,7 +230,7 @@ BarWidget {
   // its failure modes are safe -- asking too often is answered "no", asking
   // too rarely only means the rule does not fire.
   function checkShutdown() {
-    if (root.shutdownAt <= 0 && root.shutdownAfterMin <= 0) {
+    if (root.shutdownAt <= 0 && root.shutdownAfterMin <= 0 && root.shutdownRuntimeMin <= 0) {
       root.clearShutdown()
       return
     }
@@ -237,8 +239,10 @@ BarWidget {
       return
     }
     var elapsed = Date.now() / 1000 - root.outageStarted
+    var runtime = root.status ? root.status.runtimeMin : null
     var maybe = (root.shutdownAt > 0 && root.percent >= 0 && root.percent <= root.shutdownAt)
       || (root.shutdownAfterMin > 0 && elapsed >= root.shutdownAfterMin * 60)
+      || (root.shutdownRuntimeMin > 0 && typeof runtime === "number" && runtime <= root.shutdownRuntimeMin)
     if (!maybe) {
       root.clearShutdown()
       return
@@ -253,6 +257,7 @@ BarWidget {
     if (root.upsName !== "") args.push("--ups", root.upsName)
     args.push("--at", String(root.shutdownAt))
     args.push("--after", String(root.shutdownAfterMin))
+    args.push("--runtime", String(root.shutdownRuntimeMin))
     if (root.outageStarted > 0) args.push("--outage-start", String(root.outageStarted))
     if (root.debug) args.push("--debug")
     return args
@@ -709,10 +714,11 @@ BarWidget {
 
   // What the shutdown rule is set to, in one line.
   readonly property string shutdownLabel: {
-    if (root.shutdownAt <= 0 && root.shutdownAfterMin <= 0) return "off"
+    if (root.shutdownAt <= 0 && root.shutdownAfterMin <= 0 && root.shutdownRuntimeMin <= 0) return "off"
     var parts = []
     if (root.shutdownAt > 0) parts.push("at " + root.shutdownAt + " % battery")
     if (root.shutdownAfterMin > 0) parts.push("after " + root.shutdownAfterMin + " min")
+    if (root.shutdownRuntimeMin > 0) parts.push("at " + root.shutdownRuntimeMin + " min runtime")
     return parts.join(" or ")
   }
 
@@ -724,7 +730,7 @@ BarWidget {
     if (root.percent >= 0) rows.push({ label: "Battery", value: root.percent + "%" })
     if (s.runtimeMin) rows.push({ label: "Runtime", value: s.runtimeMin + " min" })
 
-    if (root.shutdownAt > 0 || root.shutdownAfterMin > 0) {
+    if (root.shutdownAt > 0 || root.shutdownAfterMin > 0 || root.shutdownRuntimeMin > 0) {
       let value = root.shutdownLabel
       if (root.shutdownCountdown >= 0) value = "in " + root.shutdownCountdown + " s"
       rows.push({ label: "Shutdown", value: value })

@@ -154,6 +154,29 @@ class Backend:
                 records.append(record)
         return records
 
+    def energy(self) -> dict:
+        """The energy meter: kWh and cost for the total, today and the week."""
+        return self._energy_from(self._run("energy", "--json", timeout=15.0))
+
+    def set_energy(self, cost_per_kwh: float) -> dict:
+        """Write the tariff, and return the re-priced summary."""
+        result = self._run(
+            "energy", "--json", "--cost-per-kwh", f"{cost_per_kwh:g}", timeout=15.0
+        )
+        return self._energy_from(result)
+
+    @staticmethod
+    def _energy_from(result: subprocess.CompletedProcess) -> dict:
+        if result.returncode != 0:
+            raise BackendError(Backend._error_text(result))
+        try:
+            summary = json.loads(result.stdout)
+        except ValueError as error:
+            raise BackendError(f"the reader returned invalid JSON: {error}") from error
+        if not isinstance(summary, dict):
+            raise BackendError("the reader returned no energy summary")
+        return summary
+
     # -------------------------------------------------------------- writes
 
     def set_value(self, key: str, value) -> tuple[bool, str]:

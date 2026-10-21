@@ -304,6 +304,24 @@ class SettingsTab(Tab):
             return settings[self.cursor]
         return None
 
+    @staticmethod
+    def _group(setting: dict) -> str:
+        """The PowerPanel configuration page this setting belongs to."""
+        return str(setting.get("group") or "")
+
+    @staticmethod
+    def _rows_for(first: int, stop: int, settings: list[dict]) -> int:
+        """How many table rows a slice needs, section headings included."""
+        rows = 0
+        previous = SettingsTab._group(settings[first - 1]) if first > 0 else ""
+        for index in range(first, stop):
+            group = SettingsTab._group(settings[index])
+            if group and group != previous:
+                rows += 1
+                previous = group
+            rows += 1
+        return rows
+
     def hints(self) -> str:
         if self.editing:
             return (
@@ -359,10 +377,34 @@ class SettingsTab(Tab):
         # The explanation of the selected setting sits under the table and
         # takes the room it needs; the table keeps the rest and scrolls.
         help_lines = self._help_lines(width, height)
-        first, stop = self.window(max(1, height - 3 - len(help_lines)))
-        for index in range(first, stop):
+        budget = max(1, height - 3 - len(help_lines))
+        count = len(settings)
+        # PowerPanel lays its configuration out as pages (Runtime, Voltage,
+        # Notification); the nearest thing a table can do is a heading each
+        # time the page changes. A heading is a row of its own, so the window
+        # has to allow for it: walk back from the cursor until one more
+        # setting (and its heading, if it starts a page) no longer fits.
+        first = self.cursor
+        while first > 0 and self._rows_for(first - 1, self.cursor + 1, settings) <= budget:
+            first -= 1
+        self.offset = first
+        bottom = top + 1 + budget
+        row = top + 2
+        previous = self._group(settings[first - 1]) if first > 0 else ""
+        for index in range(first, count):
+            if row > bottom:
+                break
+            group = self._group(settings[index])
+            if group and group != previous:
+                # The heading needs a row of its own; if it would push the
+                # setting that follows off the table, stop before the heading
+                # rather than draw a section with nothing under it.
+                if row + 1 > bottom:
+                    break
+                W.put(screen, row, SETTINGS_LABEL_X, group, theme.accent)
+                row += 1
+                previous = group
             setting = settings[index]
-            row = top + 2 + (index - first)
             selected = index == self.cursor
             writable = setting.get("writable", True)
             editing = selected and self.staged is not None
@@ -405,13 +447,14 @@ class SettingsTab(Tab):
                 )
                 W.put(screen, row, SETTINGS_ALLOWED_X, allowed, theme.muted)
             self.hits.append((row, index))
+            row += 1
 
         # The explanation follows the table it belongs to, one blank line
         # below the last row.
         self._draw_help(
             screen,
             theme,
-            top + 2 + (stop - first) + 1,
+            row + 1,
             top + height - 1,
             width,
             help_lines,
@@ -756,6 +799,126 @@ class HistoryTab(Tab):
             row += 1
 
 
+class EnergyTab(Tab):
+    """Cumulative and average energy, priced at the configured tariff.
+
+    PowerPanel calls this Energy Reporting: integrate the load over time and
+    show the kWh, then turn it into money with a cost per kWh. It is derived
+    from the same recorded samples as the History tab, so no second recorder
+    is needed; a stretch where the recorder was down is reported as
+    unrecorded instead of being filled in.
+    """
+
+    title = "Energy"
+
+    def count(self) -> int:
+        return 1 if self.app.energy else 0
+
+    def hints(self) -> str:
+        return "Enter edit tariff   e type value   r reload   ←/→ tabs   q quit"
+
+    def _tariff_setting(self) -> dict:
+        """The tariff as a setting, so the shared edit dialog can take it."""
+        summary = self.app.energy or {}
+        return {
+            "key": "costPerKwh",
+            "target": "energy",
+            "label": "Cost per kWh",
+            "unit": summary.get("currency") or "",
+            "value": summary.get("costPerKwh") or 0,
+            "min": 0,
+            "max": 100000,
+            "step": 0.01,
+            "digits": 4,
+            "writable": True,
+            "offAllowed": False,
+            "help": (
+                "PowerPanel's Energy Settings page: the tariff applied to the "
+                "recorded kWh. 0 still counts the energy but prices nothing."
+            ),
+        }
+
+    def tariff_text(self) -> str:
+        setting = self._tariff_setting()
+        return f"{F.num(setting['value'], 4)} {setting['unit']}".strip()
+
+    def activate_current(self) -> None:
+        if self.app.energy:
+            self.app.dialog = EditDialog(self._tariff_setting())
+
+    def handle(self, key) -> bool:
+        if key in ENTER_KEYS or key in ("e", "E"):
+            self.activate_current()
+            return True
+        return False
+
+    def on_show(self) -> None:
+        self.app.request_energy()
+
+    def draw(self, top, height, width):
+        app, screen, theme = self.app, self.app.screen, self.app.theme
+        limit = top + height
+        row = top + 1
+        self.hits = []
+        if app.energy_error:
+            W.put(screen, row, 3, W.clip(app.energy_error, width - 6), theme.bad)
+            return
+        summary = app.energy
+        if not summary:
+            text = (
+                "reading the recorded history…"
+                if app.energy_pending
+                else "Nothing recorded yet — run `cyberpower-ups watch`, or enable "
+                "the bundled systemd unit, to keep a log."
+            )
+            W.put(screen, row, 3, W.clip(text, width - 6), theme.muted)
+            return
+
+        tariff = summary.get("costPerKwh") or 0.0
+        currency = summary.get("currency") or ""
+        for label, key in (
+            ("Total", "total"),
+            ("Today", "today"),
+            ("Last 7 days", "week"),
+        ):
+            scope = summary.get(key) or {}
+            if row >= limit:
+                return
+            if not scope.get("samples"):
+                W.put(screen, row, 3, f"{label:<12} nothing recorded", theme.muted)
+                row += 1
+                continue
+            W.put(screen, row, 3, f"{label:<12}", theme.accent)
+            parts = [f"{scope.get('energyKwh', 0):.3f} kWh"]
+            if tariff > 0:
+                parts.append(f"{scope.get('cost', 0):.2f} {currency}".strip())
+            if scope.get("averageWatts") is not None:
+                parts.append(f"{scope['averageWatts']:.0f} W average")
+            parts.append(f"{scope.get('coveredSeconds', 0) / 3600:.1f} h measured")
+            if scope.get("missingSeconds"):
+                parts.append(f"{scope['missingSeconds'] / 60:.0f} min unrecorded")
+            W.put(screen, row, 15, W.clip("   ".join(parts), width - 18))
+            row += 1
+
+        row += 1
+        if row < limit:
+            setting = self._tariff_setting()
+            selected = self.cursor == 0
+            label = W.pad(setting["label"], SETTINGS_LABEL_W)
+            value = W.pad(self.tariff_text(), SETTINGS_VALUE_W)
+            allowed = "Enter/e edit"
+            line = _setting_row(label, value, allowed, width - 1)
+            W.put(screen, row, 0, line, theme.selection if selected else 0)
+            self.hits.append((row, 0))
+            row += 1
+        if row < limit:
+            text = (
+                "Energy is integrated from the recorded load; a gap longer than "
+                f"{(summary.get('maxGapSeconds') or 300) / 60:.0f} min is left out."
+            )
+            W.put(screen, row, 3, W.clip(text, width - 6), theme.muted)
+
+
 class AboutTab(Tab):
     title = "About"
 
@@ -777,6 +940,7 @@ class AboutTab(Tab):
             ("Model", status.get("model") or "—"),
             ("Firmware", status.get("firmware") or "—"),
             ("History", DIAG.path("history.jsonl")),
+            ("Energy", DIAG.path("energy.json")),
         )
         for label, value in details:
             if row >= limit:
@@ -792,7 +956,7 @@ class AboutTab(Tab):
         row += 1
         for line in (
             "↑/↓ or j/k     move in the list",
-            "←/→ or Tab     switch tab (1-5 jump straight there)",
+            "←/→ or Tab     switch tab (1-6 jump straight there)",
             "Enter          run an action, or start / apply a setting edit",
             "←/→ or +/-     while editing a setting: pick the new value",
             "Esc            while editing a setting: discard the change",
@@ -815,7 +979,10 @@ class EditDialog:
 
     def __init__(self, setting: dict):
         self.setting = setting
-        self.buffer = "" if setting.get("value") is None else F.num(setting["value"], 1)
+        digits = int(setting.get("digits", 1))
+        self.buffer = (
+            "" if setting.get("value") is None else F.num(setting["value"], digits)
+        )
         self.cursor = len(self.buffer)
         self.note = F.setting_allowed_text(setting)
 
@@ -925,6 +1092,9 @@ class App:
         self.settings_error = ""
         self.history: list[dict] = []
         self.history_error = ""
+        self.energy: dict | None = None
+        self.energy_error = ""
+        self._energy_pending = False
 
         self.message = ""
         self.message_kind = "info"
@@ -935,6 +1105,7 @@ class App:
             ControlsTab(self),
             SettingsTab(self),
             HistoryTab(self),
+            EnergyTab(self),
             AboutTab(self),
         ]
         self.tab_index = 0
@@ -949,6 +1120,8 @@ class App:
         self._history_pending = False
         self._history_checked = 0.0
         self._history_seen: int | None = None
+        self._energy_checked = 0.0
+        self._energy_seen: int | None = None
         self._last_input = 0.0
         self._set_sequence: dict[str, int] = {}
         self._set_base: dict[str, tuple] = {}
@@ -980,6 +1153,10 @@ class App:
     @property
     def history_pending(self) -> bool:
         return self._history_pending
+
+    @property
+    def energy_pending(self) -> bool:
+        return self._energy_pending
 
     @property
     def samples(self) -> list[dict]:
@@ -1020,6 +1197,24 @@ class App:
         self._history_seen = _history_mtime()
         self.worker.submit("history", self.backend.history)
 
+    def request_energy(self, force: bool = False) -> None:
+        """Read the energy meter. It re-reads the log, so one at a time is plenty."""
+        if self._energy_pending and not force:
+            return
+        self._energy_pending = True
+        self._energy_checked = time.monotonic()
+        self._energy_seen = _history_mtime()
+        self.worker.submit("energy", self.backend.energy)
+
+    def _poll_energy(self, now: float) -> None:
+        """Re-price when the recorder has appended: the total has moved."""
+        if now - self._energy_checked < HISTORY_CHECK:
+            return
+        self._energy_checked = now
+        stamp = _history_mtime()
+        if stamp is not None and stamp != self._energy_seen:
+            self.request_energy()
+
     def _poll_history(self, now: float) -> None:
         """Re-read the log when the recorder has appended to it.
 
@@ -1048,6 +1243,8 @@ class App:
             self.request_status()
         if isinstance(self.tab, HistoryTab):
             self._poll_history(now)
+        elif isinstance(self.tab, EnergyTab):
+            self._poll_energy(now)
 
     # ----------------------------------------------------------- writes
     def run_action(self, key: str) -> None:
@@ -1063,6 +1260,9 @@ class App:
         each press steps from what is on screen, not from the last value the
         UPS confirmed.
         """
+        if setting.get("target") == "energy":
+            self.apply_energy(value)
+            return
         key = setting["key"]
         self._set_base.setdefault(
             key, (setting.get("value"), setting.get("valueLabel"))
@@ -1085,6 +1285,21 @@ class App:
             return sequence, key, ok, message
 
         self.worker.submit(f"set:{key}", job, urgent=True)
+
+    def apply_energy(self, value) -> None:
+        """Save the tariff the recorded load is priced at (PowerPanel's Cost per kWh)."""
+        try:
+            cost = float(str(value).strip())
+        except (TypeError, ValueError):
+            self.notify("the tariff must be a number", "warn")
+            return
+        if cost < 0:
+            self.notify("the tariff cannot be negative", "warn")
+            return
+        self.notify("saving the energy tariff…")
+        self.worker.submit(
+            "energy:set", lambda: self.backend.set_energy(cost), urgent=True
+        )
 
     def close_dialog(self) -> None:
         self.dialog = None
@@ -1117,6 +1332,18 @@ class App:
                     self.history, self.history_error = [], error
                 else:
                     self.history, self.history_error = list(result), ""
+            elif slot == "energy":
+                self._energy_pending = False
+                if error is not None:
+                    self.energy, self.energy_error = None, error
+                else:
+                    self.energy, self.energy_error = result, ""
+            elif slot == "energy:set":
+                if error is not None:
+                    self.notify(error, "warn")
+                else:
+                    self.energy, self.energy_error = result, ""
+                    self.notify("energy tariff saved")
             elif slot.startswith("set:"):
                 self._finish_set(result, error)
             elif slot.startswith("action:"):
@@ -1321,7 +1548,7 @@ class App:
         if key == KEY_BTAB:
             self.select_tab((self.tab_index - 1) % len(self.tabs))
             return
-        if isinstance(key, str) and key in "12345":
+        if isinstance(key, str) and key in "123456":
             self.select_tab(int(key) - 1)
             return
         if key in ("r", "R"):
@@ -1331,6 +1558,8 @@ class App:
                 self.request_settings(force=True)
             if self.tab_index == 3 or not self.history:
                 self.request_history(force=True)
+            if isinstance(self.tab, EnergyTab) or self.energy is None:
+                self.request_energy(force=True)
             return
         if self.tab.handle(key):
             return

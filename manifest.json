@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.kamil.cyberpower-ups",
   "name": "CyberPower UPS",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "kamil",
   "license": "MIT",
   "description": "CyberPower UPS status in the bar: battery, runtime, load and mains voltage, read straight off the USB HID device, with pwrstat and NUT fallbacks and an optional event history.",
@@ -20,17 +20,18 @@
     "defaultSection": "right",
     "defaults": {
       "backend": "Auto",
+      "upsName": "",
       "intervalSec": 15,
       "showPercent": true,
-      "upsName": "",
+      "iconPreset": "Auto",
       "warnBattery": 30,
       "criticalBattery": 15,
-      "iconPreset": "Auto",
       "showTestControls": true,
-      "debug": false,
       "shutdownAt": 0,
       "shutdownAfterMin": 0,
-      "shutdownGraceSec": 30
+      "shutdownRuntimeMin": 0,
+      "shutdownGraceSec": 30,
+      "debug": false
     },
     "schema": [
       {
@@ -40,6 +41,13 @@
         "options": ["Auto", "USB direct", "pwrstat", "NUT", "Simulate"],
         "defaultValue": "Auto",
         "description": "Auto tries a direct USB read first, then pwrstat, then NUT. Simulate shows sample data with no UPS attached. The key is called backend and not source on purpose: a bar entry with a setting called source is read as a custom QML module by the shell, and the widget then renders as nothing."
+      },
+      {
+        "key": "upsName",
+        "type": "string",
+        "label": "NUT UPS name",
+        "defaultValue": "",
+        "description": "Required by the NUT backend. Leave empty to use the first UPS upsc lists."
       },
       {
         "key": "intervalSec",
@@ -59,11 +67,12 @@
         "description": "Print the charge beside the icon. Off leaves just the icon."
       },
       {
-        "key": "upsName",
-        "type": "string",
-        "label": "NUT UPS name",
-        "defaultValue": "",
-        "description": "Required by the NUT backend. Leave empty to use the first UPS upsc lists."
+        "key": "iconPreset",
+        "type": "enum",
+        "label": "Icon style",
+        "options": ["Auto", "Battery", "Power"],
+        "defaultValue": "Auto",
+        "description": "Auto uses a battery glyph that tracks charge; Power always uses a power/battery-carrying glyph."
       },
       {
         "key": "warnBattery",
@@ -86,14 +95,6 @@
         "description": "Use the urgent color at or below this charge."
       },
       {
-        "key": "iconPreset",
-        "type": "enum",
-        "label": "Icon style",
-        "options": ["Auto", "Battery", "Power"],
-        "defaultValue": "Auto",
-        "description": "Auto uses a battery glyph that tracks charge; Power always uses a power/battery-carrying glyph."
-      },
-      {
         "key": "showTestControls",
         "type": "boolean",
         "label": "Show self-test controls",
@@ -101,41 +102,51 @@
         "description": "Show the Self-test and Abort buttons in the popup. Turn off if the UPS's test beeps are unwelcome; the CLI can still run tests on demand."
       },
       {
+        "key": "shutdownAt",
+        "type": "integer",
+        "label": "Shut down at battery capacity (%)",
+        "min": 0,
+        "max": 100,
+        "step": 5,
+        "defaultValue": 0,
+        "description": "PowerPanel calls this Consume Battery Capacity: the machine powers itself off when the charge falls to this percentage. 0 leaves that half of the rule off."
+      },
+      {
+        "key": "shutdownAfterMin",
+        "type": "integer",
+        "label": "Shut down after running on battery (minutes)",
+        "min": 0,
+        "max": 120,
+        "step": 1,
+        "defaultValue": 0,
+        "description": "PowerPanel calls this Preserve Battery Power: the machine powers itself off once the UPS has run on battery for this many minutes, whichever of the three runtime rules comes first. 0 leaves that half of the rule off."
+      },
+      {
+        "key": "shutdownRuntimeMin",
+        "type": "integer",
+        "label": "Shut down at remaining runtime (minutes)",
+        "min": 0,
+        "max": 120,
+        "step": 1,
+        "defaultValue": 0,
+        "description": "PowerPanel's \"Shutdown this computer when remaining battery runtime is only xxxx minutes\": the machine powers itself off when the UPS estimates this little runtime remains. Unlike a capacity limit it accounts for the load, so it is the safer rule on a UPS whose firmware cuts the output on its own timer. 0 leaves that half of the rule off."
+      },
+      {
+        "key": "shutdownGraceSec",
+        "type": "integer",
+        "label": "Warning countdown before shutdown (seconds)",
+        "min": 5,
+        "max": 300,
+        "step": 5,
+        "defaultValue": 30,
+        "description": "How long the widget counts down, with a notification and a Cancel button, before it powers the machine off. The UPS keeps supplying power during the countdown."
+      },
+      {
         "key": "debug",
         "type": "boolean",
         "label": "Write a debug trace",
         "defaultValue": false,
         "description": "Record every device read and write to ~/.local/state/cyberpower-ups/debug.log. Leave off for normal use; turn on when reporting a problem."
-      },
-      {
-        "key": "shutdownAt",
-        "type": "integer",
-        "label": "Shut the machine down at (battery %)",
-        "min": 0,
-        "max": 100,
-        "step": 5,
-        "defaultValue": 0,
-        "description": "Power the machine off when the battery falls to this charge, so it shuts down cleanly instead of being cut off. 0 leaves the rule off."
-      },
-      {
-        "key": "shutdownAfterMin",
-        "type": "integer",
-        "label": "Shut the machine down after (minutes)",
-        "min": 0,
-        "max": 120,
-        "step": 1,
-        "defaultValue": 0,
-        "description": "Power the machine off this many minutes after the mains goes, whichever of the two rules comes first. 0 leaves this half of the rule off."
-      },
-      {
-        "key": "shutdownGraceSec",
-        "type": "integer",
-        "label": "Warning before the poweroff (seconds)",
-        "min": 5,
-        "max": 300,
-        "step": 5,
-        "defaultValue": 30,
-        "description": "How long the widget counts down and shows a notification before it powers the machine off. The mains coming back cancels it."
       }
     ]
   }
