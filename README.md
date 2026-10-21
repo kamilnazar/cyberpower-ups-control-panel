@@ -119,7 +119,7 @@ Two things do need Python and Omarchy:
 
 | Key | Default | Meaning |
 | --- | ------- | ------- |
-| `source` | `Auto` | `Auto`, `USB direct`, `pwrstat`, `NUT` or `Simulate`. |
+| `backend` | `Auto` | `Auto`, `USB direct`, `pwrstat`, `NUT` or `Simulate`. |
 | `intervalSec` | `15` | Poll interval in seconds. |
 | `showPercent` | `true` | Show the charge next to the icon. |
 | `upsName` | *(empty)* | NUT UPS name; empty uses the first `upsc -l` lists. |
@@ -128,9 +128,23 @@ Two things do need Python and Omarchy:
 | `iconPreset` | `Auto` | `Auto`, `Battery` or `Power`. |
 | `showTestControls` | `true` | Show the Self-test and Abort buttons in the popup. |
 | `debug` | `false` | Append every device read and write to the debug trace. |
+| `shutdownAt` | `0` | Battery charge (percent) that calls for the machine to power itself off. `0` leaves the rule off. |
+| `shutdownAfterMin` | `0` | Minutes into an outage that call for the same. `0` leaves that half of the rule off. |
+| `shutdownGraceSec` | `30` | How long the widget counts down before it powers the machine off. |
 
 `Simulate` shows fixed sample data and is the quickest way to try the widget
-without a UPS attached.
+without a UPS attached. To try an outage, write the readings you want into
+`~/.local/state/cyberpower-ups/simulate.json`:
+
+```json
+{"onBattery": true, "battery": 40, "inputVoltage": 0, "runtimeMin": 5}
+```
+
+> The data source setting is called `backend` and **not** `source` on purpose.
+> A bar entry that carries a setting called `source` is read as a custom QML
+> module by the shell (`BarModel.js`, `customModuleType`), and the bar then
+> loads the *value* as a QML file — `file://auto`, which is not there. The
+> widget then renders as nothing at all, with no error anywhere.
 
 This Omarchy build has no settings panel for bar widgets, so the values are
 set from the command line:
@@ -140,9 +154,49 @@ omarchy bar set io.github.kamil.cyberpower-ups showPercent false
 omarchy bar set io.github.kamil.cyberpower-ups warnBattery 25 --json
 ```
 
-Without `--json` the value is stored as text, which is right for `source` and
+Without `--json` the value is stored as text, which is right for `backend` and
 `upsName`; a number or a flag needs `--json` so it is stored as one. The
 widget reads both spellings either way.
+
+### Shutting the machine down
+
+The UPS can cut its output at any moment, and the machine then dies with the
+power still on. The widget can watch for that and shut the machine down
+cleanly instead. Two settings arm the rule, and either one is enough:
+
+```sh
+omarchy bar set io.github.kamil.cyberpower-ups shutdownAt 30 --json
+omarchy bar set io.github.kamil.cyberpower-ups shutdownAfterMin 3 --json
+```
+
+The first calls for a shutdown when the battery reaches that charge, the
+second when the outage has lasted that long. Both are off by default
+(`0`), and the rule is decided by the reader, not by the widget:
+
+```bash
+./cyberpower-ups shutdown --at 30 --after 3 --outage-start <unix timestamp>
+```
+
+which prints a verdict — `off`, `idle`, `armed` or `due` — and the reason
+behind it. The widget asks for that verdict only when the rule might be due,
+shows the reason in the popup, and counts down `shutdownGraceSec` before it
+powers the machine off. A notification says what is happening, the popup has a
+**Cancel shutdown** button, and the mains coming back cancels it by itself.
+The decision is written to the history, so the log says why the machine went
+down.
+
+Three things keep it from firing by accident: the rule is off unless it is
+armed, the outage has to be older than twenty seconds (a blink of the mains is
+not a reason to power off), and a reading without a charge is not read as a
+charge of zero.
+
+**Mind the UPS's own timer.** On some models — the CPS UT2200EG here — the
+UPS compares its *remaining runtime* against a limit of its own (300 s on this
+one) and cuts the output when the estimate falls below it, long before the
+battery is empty. The charge thresholds are the firmware's as well (10 % and
+20 % here, and the writes are ignored). So the rule above is the only way to
+get a clean shutdown, and it has to fire inside the UPS's own window: on this
+unit, five minutes of outage and about 58 % of charge.
 
 ## Control panel (TUI)
 
@@ -200,7 +254,7 @@ get there. Only the settings your model publishes and marks writable appear:
 | Audible alarm | `AudibleAlarmControl` `0x5A` | disabled / enabled / muted | beeps when the mains fails or the battery runs low |
 | Low-battery warning at | `WarningCapacityLimit` `0x8C` | 0–100 % | the charge at which the UPS says the battery is low — it only warns |
 | Shut down at capacity | `RemainingCapacityLimit` `0x29` | 0–100 % | the charge at which the UPS cuts its output |
-| Shut down at runtime | `RemainingTimeLimit` `0x2A` | 0–600 s | how long the output stays up after the mains fails |
+| Shut down at runtime | `RemainingTimeLimit` `0x2A` | 0–600 s (the firmware holds it to 300–600) | the runtime the UPS estimates is left when it cuts the output |
 | Low voltage transfer | `LowVoltageTransfer` `0x53` | 167–175 V | the input voltage below which the UPS takes over |
 | High voltage transfer | `HighVoltageTransfer` `0x54` | 287–295 V | the input voltage above which the UPS takes over |
 | Delay before shutdown | `DelayBeforeShutdown` `0x57` | off, or seconds | the window the machine has to shut down cleanly |
@@ -530,11 +584,13 @@ captured a few seconds earlier.
 
 ### If you want automatic shutdown
 
-The UPS itself only reports state; something has to act on it. NUT is the
-natural tool: run `usbhid-ups` against the UPS and let `upsmon` handle
-shutdowns, and point this widget's `source` at `NUT` for display. The reader
-exposes the same values, so a small systemd unit could just as well read its
-JSON and act.
+The UPS itself only reports state; something has to act on it. This widget
+can: the `shutdownAt` and `shutdownAfterMin` settings above shut the machine
+down cleanly when the charge or the clock says so, and the decision is
+written to the history. NUT is the other way: run `usbhid-ups` against the
+UPS and let `upsmon` handle shutdowns, and point this widget's `backend` at
+`NUT` for display. The reader exposes the same values, so a small systemd unit
+could just as well read its JSON and act.
 
 ## License
 

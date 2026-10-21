@@ -1338,11 +1338,14 @@ SETTING_HELP = {
         "the battery has something left in it."
     ),
     "runtimeLimit": (
-        "How long the UPS keeps the output up after the mains fails. It counts "
-        "from the moment the mains goes, not from the charge: on this unit "
-        "300 s cut the power five minutes into an outage, at 58% charge, with "
-        "22 minutes of estimated runtime still showing. Raise it to give the "
-        "machine time to shut down, and let the capacity limit do the deep cut."
+        "The UPS compares this with its own estimate of the runtime it has "
+        "left and cuts the output once the estimate falls below it. That "
+        "estimate is much lower than the runtime the unit reports: 32-38 min "
+        "reported against roughly 12 min of real time at 220 W, so 300 s means "
+        "'shut down with about five minutes of real runtime left' -- in the "
+        "last outage that was 58% charge. The firmware refuses anything below "
+        "300 s, and a limit above the unit's real runtime makes it drop the "
+        "output while it is still on mains."
     ),
     "lowVoltageTransfer": (
         "The input voltage below which the UPS switches to the battery. A lower "
@@ -1517,9 +1520,38 @@ SIMULATED = {
 }
 
 
+def simulate_override() -> dict:
+    """Extra readings for the simulate source.
+
+    The simulate source is there to try the widget out without a UPS
+    attached, so it takes a blob of readings to play with: the file
+    ``~/.local/state/cyberpower-ups/simulate.json`` or the environment
+    variable ``CYBERPOWER_UPS_SIMULATE``, both holding a JSON object.
+    """
+    texts = []
+    try:
+        with open(os.path.join(state_dir(), SIMULATE_NAME), encoding="utf-8") as handle:
+            texts.append(handle.read())
+    except OSError:
+        pass
+    texts.append(os.environ.get("CYBERPOWER_UPS_SIMULATE", ""))
+    for text in texts:
+        text = text.strip()
+        if not text:
+            continue
+        try:
+            extra = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(extra, dict):
+            return extra
+    return {}
+
+
 def collect(source: str, ups_name: str | None = None) -> dict:
     if source == "simulate":
         data = dict(SIMULATED)
+        data.update(simulate_override())
         data["updated"] = int(time.time())
         return data
     if source == "hidraw":
@@ -1592,6 +1624,7 @@ def dump(device: UpsDevice) -> None:
 # bundled systemd unit to keep it on, or record only while something polls.
 
 HISTORY_NAME = "history.jsonl"
+SIMULATE_NAME = "simulate.json"
 HISTORY_MAX_BYTES = 2 * 1024 * 1024
 VOLTAGE_BAND = 10.0  # percent from nominal that still counts as normal
 
@@ -1618,6 +1651,101 @@ SAMPLE_KEYS = (
 
 def history_path() -> str:
     return os.path.join(state_dir(), HISTORY_NAME)
+
+
+#: The shortest outage the shutdown rule may act on. A mains flicker that
+#: lasts a moment must never power the machine off, so the rule stays quiet
+#: until the outage is older than this.
+SHUTDOWN_MIN_OUTAGE = 20.0
+
+
+def _log_shutdown(verdict: dict) -> None:
+    """Record that the shutdown rule is due, so the log says why.
+
+    The bar has one widget per monitor, and both of them notice the rule at
+    the same moment, so the last few records are checked first: the event is
+    written once, not twice.
+    """
+    text = str(verdict.get("reason") or "the rule is due")
+    for record in read_history()[-3:]:
+        if record.get("kind") == "event" and record.get("event") == "shutdownDue":
+            if record.get("text") == text:
+                return
+    append_history(
+        [
+            {
+                "t": int(time.time()),
+                "kind": "event",
+                "event": "shutdownDue",
+                "text": text,
+                "level": "warn",
+            }
+        ]
+    )
+
+
+def shutdown_verdict(
+    status: dict | None,
+    at: int = 0,
+    after_min: int = 0,
+    outage_started: float | None = None,
+    now: float | None = None,
+) -> dict:
+    """Should the machine shut itself down? A pure function, no I/O.
+
+    ``at`` is the battery charge (in percent) that calls for a shutdown and
+    ``after_min`` the number of minutes into an outage; either one is enough
+    on its own, and zero switches that half of the rule off. ``outage_started``
+    is when the UPS was first seen on battery. The verdict is a small
+    document: ``state`` is one of ``off`` (no rule), ``idle`` (the mains is
+    up), ``armed`` (the rule is waiting) or ``due`` (shut down now).
+    """
+    now = time.time() if now is None else now
+    verdict = {
+        "armed": bool(at or after_min),
+        "state": "off",
+        "onBattery": False,
+        "charge": None,
+        "outageSeconds": 0,
+        "reason": "",
+    }
+    if not verdict["armed"]:
+        verdict["reason"] = "no shutdown rule is set"
+        return verdict
+    if not status or not status.get("onBattery"):
+        verdict["state"] = "idle"
+        verdict["reason"] = "the mains is up"
+        return verdict
+
+    verdict["onBattery"] = True
+    charge = status.get("battery")
+    verdict["charge"] = charge if isinstance(charge, (int, float)) else None
+    started = outage_started if outage_started is not None else now
+    elapsed = max(0.0, now - started)
+    verdict["outageSeconds"] = int(elapsed)
+
+    if elapsed < SHUTDOWN_MIN_OUTAGE:
+        # Too fresh to be a real outage: a blink of the mains is not a reason
+        # to power the machine off.
+        verdict["state"] = "armed"
+        verdict["reason"] = f"the outage is {int(elapsed)} s old"
+        return verdict
+
+    reasons = []
+    if at and verdict["charge"] is not None and verdict["charge"] <= at:
+        reasons.append(f"the battery is at {verdict['charge']:g} % (limit {at} %)")
+    if after_min and elapsed >= after_min * 60:
+        reasons.append(
+            f"the outage has lasted {elapsed / 60:.1f} min (limit {after_min} min)"
+        )
+    if reasons:
+        verdict["state"] = "due"
+        verdict["reason"] = "; ".join(reasons)
+        return verdict
+
+    verdict["state"] = "armed"
+    verdict["reason"] = "the rule is armed and waiting"
+    return verdict
 
 
 def read_history() -> list[dict]:
@@ -2109,6 +2237,7 @@ def main(argv=None) -> int:
             "probe",
             "watch",
             "history",
+            "shutdown",
         ],
     )
     parser.add_argument(
@@ -2160,6 +2289,32 @@ def main(argv=None) -> int:
         "--json", action="store_true", help="history: raw JSON lines instead of a table"
     )
     parser.add_argument(
+        "--at",
+        type=int,
+        default=0,
+        help="shutdown: battery charge (%%) that calls for a shutdown, 0 to leave "
+        "that half of the rule off",
+    )
+    parser.add_argument(
+        "--after",
+        type=int,
+        default=0,
+        help="shutdown: minutes into an outage that call for a shutdown, 0 to "
+        "leave that half of the rule off",
+    )
+    parser.add_argument(
+        "--outage-start",
+        type=float,
+        default=None,
+        help="shutdown: when the outage started (a Unix timestamp)",
+    )
+    parser.add_argument(
+        "--log",
+        action="store_true",
+        help="shutdown: record the decision in the history, so the log says "
+        "why the machine was powered off",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="append every device read and write to the debug trace",
@@ -2188,6 +2343,33 @@ def main(argv=None) -> int:
             if args.source == "simulate":
                 raise NoDevice("the simulate source cannot be configured")
             print(json.dumps(read_config(), indent=2 if args.pretty else None))
+            return 0
+
+        if args.action == "shutdown":
+            # The verdict is taken from a fresh reading, so an outage that
+            # has just ended cancels the rule by itself.
+            try:
+                status = collect(args.source, args.ups)
+            except NoDevice as error:
+                print(
+                    json.dumps(
+                        {
+                            "armed": bool(args.at or args.after),
+                            "state": "idle",
+                            "reason": str(error),
+                        }
+                    )
+                )
+                return 0
+            verdict = shutdown_verdict(
+                status,
+                at=args.at,
+                after_min=args.after,
+                outage_started=args.outage_start,
+            )
+            if args.log and verdict["state"] == "due":
+                _log_shutdown(verdict)
+            print(json.dumps(verdict, indent=2 if args.pretty else None))
             return 0
 
         if args.action == "set":

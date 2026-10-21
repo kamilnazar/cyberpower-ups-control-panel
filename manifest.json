@@ -19,7 +19,7 @@
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "source": "Auto",
+      "backend": "Auto",
       "intervalSec": 15,
       "showPercent": true,
       "upsName": "",
@@ -27,16 +27,19 @@
       "criticalBattery": 15,
       "iconPreset": "Auto",
       "showTestControls": true,
-      "debug": false
+      "debug": false,
+      "shutdownAt": 0,
+      "shutdownAfterMin": 0,
+      "shutdownGraceSec": 30
     },
     "schema": [
       {
-        "key": "source",
+        "key": "backend",
         "type": "enum",
         "label": "Data source",
         "options": ["Auto", "USB direct", "pwrstat", "NUT", "Simulate"],
         "defaultValue": "Auto",
-        "description": "Auto tries a direct USB read first, then pwrstat, then NUT. Simulate shows sample data with no UPS attached."
+        "description": "Auto tries a direct USB read first, then pwrstat, then NUT. Simulate shows sample data with no UPS attached. The key is called backend and not source on purpose: a bar entry with a setting called source is read as a custom QML module by the shell, and the widget then renders as nothing."
       },
       {
         "key": "intervalSec",
@@ -103,6 +106,36 @@
         "label": "Write a debug trace",
         "defaultValue": false,
         "description": "Record every device read and write to ~/.local/state/cyberpower-ups/debug.log. Leave off for normal use; turn on when reporting a problem."
+      },
+      {
+        "key": "shutdownAt",
+        "type": "integer",
+        "label": "Shut the machine down at (battery %)",
+        "min": 0,
+        "max": 100,
+        "step": 5,
+        "defaultValue": 0,
+        "description": "Power the machine off when the battery falls to this charge, so it shuts down cleanly instead of being cut off. 0 leaves the rule off."
+      },
+      {
+        "key": "shutdownAfterMin",
+        "type": "integer",
+        "label": "Shut the machine down after (minutes)",
+        "min": 0,
+        "max": 120,
+        "step": 1,
+        "defaultValue": 0,
+        "description": "Power the machine off this many minutes after the mains goes, whichever of the two rules comes first. 0 leaves this half of the rule off."
+      },
+      {
+        "key": "shutdownGraceSec",
+        "type": "integer",
+        "label": "Warning before the poweroff (seconds)",
+        "min": 5,
+        "max": 300,
+        "step": 5,
+        "defaultValue": 30,
+        "description": "How long the widget counts down and shows a notification before it powers the machine off. The mains coming back cancels it."
       }
     ]
   }

@@ -854,6 +854,94 @@ def test_history_survives_damage_and_keeps_the_newest():
         assert kept[-1]["t"] == 105 and kept[-1]["kind"] == "sample"
 
 
+# --------------------------------------------------------------- the rule
+
+
+def _on_battery(charge=100):
+    return {"onBattery": True, "battery": charge, "runtimeMin": 20}
+
+
+def test_the_shutdown_rule_is_off_until_it_is_armed():
+    """No rule set means no shutdown, whatever the UPS says."""
+    verdict = ups.shutdown_verdict(_on_battery(charge=5), at=0, after_min=0)
+    assert verdict["state"] == "off", verdict
+    assert verdict["armed"] is False, verdict
+
+
+def test_the_shutdown_rule_stays_quiet_while_the_mains_is_up():
+    verdict = ups.shutdown_verdict({"onBattery": False, "battery": 100}, at=80)
+    assert verdict["state"] == "idle", verdict
+    assert "mains" in verdict["reason"], verdict
+
+
+def test_the_shutdown_rule_fires_on_the_charge():
+    verdict = ups.shutdown_verdict(
+        _on_battery(charge=70), at=80, outage_started=1000, now=1200
+    )
+    assert verdict["state"] == "due", verdict
+    assert "70" in verdict["reason"] and "80" in verdict["reason"], verdict
+
+
+def test_the_shutdown_rule_fires_after_the_time():
+    verdict = ups.shutdown_verdict(
+        _on_battery(charge=100), after_min=3, outage_started=1000, now=1000 + 181
+    )
+    assert verdict["state"] == "due", verdict
+    assert "3 min" in verdict["reason"], verdict
+
+
+def test_a_momentary_blip_never_calls_for_a_shutdown():
+    """A mains flicker of a second must not power the machine off."""
+    verdict = ups.shutdown_verdict(
+        _on_battery(charge=10), at=80, outage_started=1000, now=1000 + 5
+    )
+    assert verdict["state"] == "armed", verdict
+    assert "due" not in verdict["reason"], verdict
+
+
+def test_the_rule_waits_for_a_real_outage_before_it_fires():
+    """The charge may already be low; the outage still has to be old enough."""
+    fresh = ups.shutdown_verdict(
+        _on_battery(charge=10), at=80, outage_started=1000, now=1000 + 10
+    )
+    assert fresh["state"] == "armed", fresh
+    old = ups.shutdown_verdict(
+        _on_battery(charge=10), at=80, outage_started=1000, now=1000 + 30
+    )
+    assert old["state"] == "due", old
+
+
+def test_either_half_of_the_rule_works_on_its_own():
+    """A charge limit alone, and a time limit alone, each call for a shutdown."""
+    charge_only = ups.shutdown_verdict(
+        _on_battery(charge=50), at=60, outage_started=1000, now=1300
+    )
+    assert charge_only["state"] == "due", charge_only
+    time_only = ups.shutdown_verdict(
+        _on_battery(charge=100), after_min=2, outage_started=1000, now=1300
+    )
+    assert time_only["state"] == "due", time_only
+    # The half that is switched off never fires on its own: with only a
+    # charge limit, a long outage is not enough, and with only a time
+    # limit, a low charge is not enough.
+    long_outage = ups.shutdown_verdict(
+        _on_battery(charge=100), at=60, outage_started=1000, now=1000 + 600
+    )
+    assert long_outage["state"] == "armed", long_outage
+    low_charge = ups.shutdown_verdict(
+        _on_battery(charge=10), after_min=2, outage_started=1000, now=1030
+    )
+    assert low_charge["state"] == "armed", low_charge
+
+
+def test_a_missing_charge_does_not_call_for_a_shutdown():
+    """A reading without a charge must not be read as a charge of zero."""
+    verdict = ups.shutdown_verdict(
+        {"onBattery": True, "battery": None}, at=80, outage_started=1000, now=1300
+    )
+    assert verdict["state"] == "armed", verdict
+
+
 def main():
     failures = 0
     for name, fn in sorted(globals().items()):

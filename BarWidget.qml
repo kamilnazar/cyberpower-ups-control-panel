@@ -26,14 +26,25 @@ BarWidget {
   property bool pollStarted: false
   property bool pollFinished: false
 
+  // The shutdown rule's state. The clock starts when the UPS is first seen
+  // on battery; the countdown runs while the rule is waiting to be obeyed.
+  property double outageStarted: 0
+  property double shutdownTriggered: 0
+  property int shutdownCountdown: -1
+  property string shutdownReason: ""
+  property bool shutdownCancelled: false
+
   readonly property string reader: decodeURIComponent(
     String(Qt.resolvedUrl("bin/cyberpower-ups")).replace("file://", ""))
   readonly property string tui: decodeURIComponent(
     String(Qt.resolvedUrl("bin/cyberpower-ups-tui")).replace("file://", ""))
 
   // The reader speaks in lowercase tokens; the settings UI shows prose.
+  // The setting is called "backend", not "source": a bar entry that carries
+  // a setting called "source" is read as a custom QML module by the shell,
+  // and the widget then renders as nothing at all.
   readonly property string source: {
-    var choice = root.setting("source", "Auto")
+    var choice = root.setting("backend", "Auto")
     if (choice === "USB direct") return "hidraw"
     if (choice === "pwrstat") return "pwrstat"
     if (choice === "NUT") return "nut"
@@ -49,6 +60,14 @@ BarWidget {
   readonly property string iconPreset: String(root.setting("iconPreset", "Auto") || "Auto")
   readonly property bool showTestControls: root.boolSetting("showTestControls", true)
   readonly property bool debug: root.boolSetting("debug", false)
+
+  // The shutdown rule: the battery charge (in percent) and the number of
+  // minutes into an outage that call for the machine to power itself off.
+  // Zero switches that half of the rule off, and both being zero leaves the
+  // whole rule off -- which is how it ships.
+  readonly property int shutdownAt: Math.max(0, root.numberSetting("shutdownAt", 0))
+  readonly property int shutdownAfterMin: Math.max(0, root.numberSetting("shutdownAfterMin", 0))
+  readonly property int shutdownGraceSec: Math.max(5, root.numberSetting("shutdownGraceSec", 30))
 
   readonly property bool present: root.status !== null && root.status.battery !== undefined
   readonly property int percent: root.present && typeof root.status.battery === "number"
@@ -126,6 +145,9 @@ BarWidget {
     if (root.status.runtimeMin) parts.push(root.status.runtimeMin + " min left")
     if (root.status.loadPercent !== null && root.status.loadPercent !== undefined)
       parts.push(root.status.loadPercent + "% load")
+    if (root.shutdownCountdown >= 0) parts.push("shutting down in " + root.shutdownCountdown + " s")
+    else if (root.shutdownAt > 0 || root.shutdownAfterMin > 0)
+      parts.push("shutdown " + root.shutdownLabel)
     return parts.join("  ·  ")
   }
 
@@ -186,6 +208,105 @@ BarWidget {
     tuiProc.running = true
   }
 
+  // ------------------------------------------------------------- shutdown
+
+  // The UPS losing the mains starts the clock the rule reads. The clock
+  // lives here because the widget is the one that watches the UPS; the rule
+  // itself is the reader's, and is asked for a verdict below.
+  function trackOutage() {
+    if (!root.onBattery) {
+      root.outageStarted = 0
+      root.shutdownCancelled = false
+      root.clearShutdown()
+      return
+    }
+    if (root.outageStarted <= 0) root.outageStarted = Date.now() / 1000
+  }
+
+  // A cheap look before the reader is asked for the authoritative verdict:
+  // it only decides whether asking is worth another read of the UPS. Both of
+  // its failure modes are safe -- asking too often is answered "no", asking
+  // too rarely only means the rule does not fire.
+  function checkShutdown() {
+    if (root.shutdownAt <= 0 && root.shutdownAfterMin <= 0) {
+      root.clearShutdown()
+      return
+    }
+    if (!root.onBattery || root.shutdownCancelled) {
+      root.clearShutdown()
+      return
+    }
+    var elapsed = Date.now() / 1000 - root.outageStarted
+    var maybe = (root.shutdownAt > 0 && root.percent >= 0 && root.percent <= root.shutdownAt)
+      || (root.shutdownAfterMin > 0 && elapsed >= root.shutdownAfterMin * 60)
+    if (!maybe) {
+      root.clearShutdown()
+      return
+    }
+    if (shutdownProc.running) return
+    shutdownProc.command = root.shutdownCommand()
+    shutdownProc.running = true
+  }
+
+  function shutdownCommand() {
+    var args = [root.reader, "shutdown", "--source", root.source]
+    if (root.upsName !== "") args.push("--ups", root.upsName)
+    args.push("--at", String(root.shutdownAt))
+    args.push("--after", String(root.shutdownAfterMin))
+    if (root.outageStarted > 0) args.push("--outage-start", String(root.outageStarted))
+    if (root.debug) args.push("--debug")
+    return args
+  }
+
+  // The same command again, with --log, so the history says why the machine
+  // was powered off. Only the first notice of an outage asks for it.
+  function shutdownLogCommand() {
+    var args = root.shutdownCommand()
+    args.splice(1, 0, "--log")
+    return args
+  }
+
+  function clearShutdown() {
+    root.shutdownTriggered = 0
+    root.shutdownCountdown = -1
+  }
+
+  function cancelShutdown() {
+    root.shutdownCancelled = true
+    root.clearShutdown()
+    root.shutdownReason = ""
+    root.actionMessage = "The shutdown was cancelled"
+  }
+
+  // The countdown to the poweroff, on its own timer so the number in the
+  // popup is right even between polls.
+  function tickShutdown() {
+    if (root.shutdownTriggered <= 0) {
+      root.shutdownCountdown = -1
+      return
+    }
+    var left = Math.ceil(root.shutdownGraceSec - (Date.now() / 1000 - root.shutdownTriggered))
+    root.shutdownCountdown = left
+    if (left > 0) return
+    root.clearShutdown()
+    root.powerOff()
+  }
+
+  function powerOff() {
+    if (powerProc.running) return
+    root.actionMessage = "Shutting down"
+    // Omarchy's own shutdown: it closes the windows first and schedules the
+    // poweroff in the user manager, so it survives this widget going away.
+    powerProc.command = ["omarchy-system-shutdown"]
+    powerProc.running = true
+  }
+
+  function notify(message) {
+    if (notifyProc.running) return
+    notifyProc.command = ["notify-send", "CyberPower UPS", message]
+    notifyProc.running = true
+  }
+
   Process {
     id: statusProc
     command: []
@@ -201,18 +322,84 @@ BarWidget {
       root.pollFinished = true
       var out = String(statusOut.text || "").trim()
       if (code === 0 && out !== "") {
+        let parsed = null
         try {
-          root.status = JSON.parse(out)
-          root.errorText = ""
-          return
+          parsed = JSON.parse(out)
         } catch (error) {
           root.errorText = "Could not parse the reader's output."
+        }
+        if (parsed !== null) {
+          root.status = parsed
+          root.errorText = ""
+          root.trackOutage()
+          root.checkShutdown()
+          return
         }
       }
       root.status = null
       var message = String(statusErr.text || "").trim()
       root.errorText = message !== "" ? message : "The UPS reader failed (exit " + code + ")."
     }
+  }
+
+  // The reader's verdict on the shutdown rule. It is asked only when the
+  // cheap look says the rule might be due, so this is not a read per poll.
+  Process {
+    id: shutdownProc
+    command: []
+    stdout: StdioCollector {
+      id: shutdownOut
+      waitForEnd: true
+    }
+    stderr: StdioCollector {
+      id: shutdownErr
+      waitForEnd: true
+    }
+    onExited: function(code) {
+      if (code !== 0) return
+      var out = String(shutdownOut.text || "").trim()
+      if (out === "") return
+      let verdict = null
+      try {
+        verdict = JSON.parse(out)
+      } catch (error) {
+        return
+      }
+      root.shutdownReason = String(verdict.reason || "")
+      if (verdict.state === "due") {
+        if (root.shutdownTriggered <= 0) {
+          root.shutdownTriggered = Date.now() / 1000
+          root.notify("Shutting down in " + root.shutdownGraceSec + " s — "
+                      + root.shutdownReason)
+          // Say it in the history too, so the log explains the poweroff.
+          if (!logProc.running) {
+            logProc.command = root.shutdownLogCommand()
+            logProc.running = true
+          }
+        }
+        return
+      }
+      root.clearShutdown()
+    }
+  }
+
+  // The history note. It is a separate process so the verdict is not held up
+  // by the write.
+  Process {
+    id: logProc
+    command: []
+  }
+
+  // The poweroff itself. systemd asks the seat whether the active session
+  // may power the machine off, which it may.
+  Process {
+    id: powerProc
+    command: []
+  }
+
+  Process {
+    id: notifyProc
+    command: []
   }
 
   Process {
@@ -247,6 +434,15 @@ BarWidget {
     repeat: true
     triggeredOnStart: true
     onTriggered: root.refresh()
+  }
+
+  // The countdown to the poweroff ticks on its own, so the number in the
+  // popup does not wait for the next poll.
+  Timer {
+    interval: 1000
+    running: true
+    repeat: true
+    onTriggered: root.tickShutdown()
   }
 
   // ------------------------------------------------------------------- bar
@@ -457,6 +653,26 @@ BarWidget {
           tooltipText: "Silence the UPS alarm until the next event"
           onClicked: root.runAction("mute")
         }
+
+        Button {
+          text: "Cancel shutdown"
+          iconText: "󰅖"
+          foreground: root.normalColor
+          visible: root.shutdownCountdown >= 0
+          tooltipText: "Do not power the machine off when the rule is due"
+          onClicked: root.cancelShutdown()
+        }
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        visible: root.shutdownReason !== ""
+        text: root.shutdownReason
+        color: Qt.darker(root.normalColor, 1.4)
+        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+        width: parent.width
       }
 
       Text {
@@ -491,6 +707,15 @@ BarWidget {
     return unit ? shown + unit : shown
   }
 
+  // What the shutdown rule is set to, in one line.
+  readonly property string shutdownLabel: {
+    if (root.shutdownAt <= 0 && root.shutdownAfterMin <= 0) return "off"
+    var parts = []
+    if (root.shutdownAt > 0) parts.push("at " + root.shutdownAt + " % battery")
+    if (root.shutdownAfterMin > 0) parts.push("after " + root.shutdownAfterMin + " min")
+    return parts.join(" or ")
+  }
+
   function readingRows() {
     if (!root.present) return []
     var s = root.status
@@ -498,6 +723,12 @@ BarWidget {
 
     if (root.percent >= 0) rows.push({ label: "Battery", value: root.percent + "%" })
     if (s.runtimeMin) rows.push({ label: "Runtime", value: s.runtimeMin + " min" })
+
+    if (root.shutdownAt > 0 || root.shutdownAfterMin > 0) {
+      let value = root.shutdownLabel
+      if (root.shutdownCountdown >= 0) value = "in " + root.shutdownCountdown + " s"
+      rows.push({ label: "Shutdown", value: value })
+    }
 
     var load = root.fmt(s.loadPercent, "%")
     if (s.loadWatts) load += " (" + s.loadWatts + " W)"
